@@ -1,0 +1,54 @@
+# Git
+.git/
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Test / coverage
+tests/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Type checkers
+.pyright/
+.mypy_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# Claude Code
+.claude/
+
+# OS
+.DS_Store
+
+# Environment & secrets
+.env
+.env.*
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Static Analysis & Git Hooks
+scripts/
+
+# CI
+.github/
+
+# Logs
+*.log
+/logs/
