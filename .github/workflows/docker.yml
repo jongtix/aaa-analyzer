@@ -1,0 +1,85 @@
+name: Docker
+
+# Release 워크플로 완료 시 트리거
+# GITHUB_TOKEN으로 생성한 태그는 다른 워크플로를 트리거하지 않으므로 (GitHub 제약)
+# tags: v* 대신 workflow_run 이벤트를 사용한다
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+
+permissions: {}  # 워크플로 전체 기본 권한 차단, job별 최소 권한 선언
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    # Release 워크플로가 성공한 경우에만 실행
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # 1차 checkout: 태그 조회용 (workflow_run의 HEAD는 릴리즈 커밋 이전 시점)
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      # 최신 태그 조회 + semver 검증
+      # python-semantic-release가 릴리즈를 생성하지 않은 경우 (chore 커밋만 등) 빌드 스킵
+      - name: Get latest tag
+        id: tag
+        run: |
+          git fetch --tags
+          TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "No valid semver release tag found (tag='$TAG'). Skipping build."
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "valid=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 2차 checkout: 태그가 가리키는 릴리즈 커밋으로 전환
+      # pyproject.toml 버전이 업데이트된 소스로 Docker 이미지를 빌드한다
+      - name: Checkout release commit
+        if: ${{ steps.tag.outputs.valid == 'true' }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Login to GHCR
+        if: ${{ steps.tag.outputs.valid == 'true' }}
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 3-tag 전략: v1.2.3 + latest + sha-xxxxx
+      - name: Extract metadata
+        if: ${{ steps.tag.outputs.valid == 'true' }}
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ steps.tag.outputs.tag }}
+            type=raw,value=latest
+            type=sha,prefix=sha-,format=short
+
+      - name: Setup Buildx
+        if: ${{ steps.tag.outputs.valid == 'true' }}
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Build and push
+        if: ${{ steps.tag.outputs.valid == 'true' }}
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
