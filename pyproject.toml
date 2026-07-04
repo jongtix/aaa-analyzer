@@ -53,6 +53,10 @@ version_toml = ["pyproject.toml:project.version"]
 commit_parser = "emoji"
 major_on_zero = false
 build_command = ""
+# collector .releaserc.js의 @semantic-release/git message 컨벤션과 동일한 형식
+# (gitmoji + conventional + [skip ci] — 릴리즈 커밋 자체가 Release 워크플로우를
+# 재트리거하지 않도록 방지).
+commit_message = "🔖 chore(release): v{version} [skip ci]"
 
 [tool.semantic_release.commit_parser_options]
 major_tags = ["breaking"]

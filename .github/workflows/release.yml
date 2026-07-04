@@ -62,3 +62,5 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           git_committer_name: "github-actions[bot]"
           git_committer_email: "github-actions[bot]@users.noreply.github.com"
+          # collector는 CHANGELOG.md를 생성하지 않음(.releaserc.js에 changelog 플러그인 미포함) — 동일하게 비활성화.
+          changelog: false
