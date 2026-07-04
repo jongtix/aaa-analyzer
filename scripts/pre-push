@@ -1,0 +1,31 @@
+#!/bin/sh
+# Pre-push hook: pyright + 단위 pytest(통합 마커 제외)
+# 컨테이너 기동 없음. 목표: < 90초 (REQ-ANALYZER-FOUNDATION-021/022).
+# 통합 테스트(@pytest.mark.integration)는 CI에서만 실행된다.
+# See SPEC-ANALYZER-FOUNDATION-001 / aaa-analyzer/CLAUDE.md 테스트 마커 컨벤션.
+
+echo "[pre-push] Running pyright and unit tests..."
+
+TIMEOUT_SECS=90
+
+(
+    uv run pyright \
+    && uv run pytest -m "not integration" --no-cov
+) &
+CHECK_PID=$!
+
+( sleep $TIMEOUT_SECS; echo "[pre-push] Timeout after ${TIMEOUT_SECS}s — killing checks."; kill $CHECK_PID 2>/dev/null ) &
+WATCHDOG_PID=$!
+
+wait $CHECK_PID
+CHECK_EXIT=$?
+
+kill $WATCHDOG_PID 2>/dev/null
+wait $WATCHDOG_PID 2>/dev/null
+
+if [ $CHECK_EXIT -ne 0 ]; then
+    echo "[pre-push] pyright or unit tests failed. Fix issues before pushing."
+    exit 1
+fi
+
+echo "[pre-push] All checks passed."
