@@ -79,9 +79,9 @@ jobs:
           if [ "$ROLLBACK_OUTCOME" = "success" ]; then
             SHORT_DIGEST="${PREV_DIGEST##*@}"
             SHORT_DIGEST="${SHORT_DIGEST:0:15}"
-            TEXT="⚠️ <b>aaa-analyzer 배포 실패 — 자동 롤백 완료</b>${NL}이전 이미지로 복구: ${SHORT_DIGEST}${NL}브랜치: ${BRANCH}${NL}커밋: ${SHORT_SHA}"
+            TEXT="⚠️ <b>[점검] aaa-analyzer 배포 실패 — 자동 롤백 완료</b>${NL}상태: 새 이미지 배포 실패 후 이전 이미지(${SHORT_DIGEST})로 자동 복구됨. 브랜치 ${BRANCH}, 커밋 ${SHORT_SHA}.${NL}확인: 배포 실패 원인(빌드·헬스체크) 로그 확인 후 재배포"
           else
-            TEXT="🚨 <b>aaa-analyzer 배포 실패 — 자동 롤백도 실패</b>${NL}수동 개입이 필요합니다.${NL}브랜치: ${BRANCH}${NL}커밋: ${SHORT_SHA}"
+            TEXT="🚨 <b>[긴급] aaa-analyzer 배포 실패 — 자동 롤백도 실패</b>${NL}상태: 새 이미지 배포와 이전 이미지 복구 모두 실패 — 서비스 다운 가능성. 브랜치 ${BRANCH}, 커밋 ${SHORT_SHA}.${NL}확인: NAS SSH 접속 → \"docker ps -a | grep analyzer\"로 컨테이너 상태 즉시 확인, 수동 개입 필요"
           fi
           printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$BOT_TOKEN" \
             | curl -sf -K - \
