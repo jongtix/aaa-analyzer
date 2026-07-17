@@ -31,7 +31,7 @@ AAA(Algorithmic Alpha Advisor) Phase 2 ML 분석 서비스. 시장 데이터 기
 uv sync
 
 # 부모 프로세스
-uv run uvicorn analyzer.api.app:create_app --factory --host 0.0.0.0 --port 8000
+uv run python -m analyzer.api.main
 
 # 자식 CLI
 uv run python -m analyzer.inference --market domestic

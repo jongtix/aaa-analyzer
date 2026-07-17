@@ -35,8 +35,8 @@ uv sync
 ## Run
 
 ```bash
-# 부모 프로세스 (FastAPI: /health, /metrics)
-uv run uvicorn analyzer.api.app:create_app --factory --host 0.0.0.0 --port 8000
+# 부모 프로세스 (FastAPI: /health, /metrics + 로거·컨슈머/스케줄러 배선)
+uv run python -m analyzer.api.main
 
 # 자식 CLI (완결형 추론 진입점 골격)
 uv run python -m analyzer.inference --market domestic
