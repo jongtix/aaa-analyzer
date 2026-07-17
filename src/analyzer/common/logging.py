@@ -7,6 +7,22 @@ KST 타임존을 사용해야 하며, 트레이싱 컨텍스트 내에서 발생
 REQ-LOGS-001~006 (SPEC-OBSV-LOGS-002): stdout에 더해 회전 파일 sink에도 동일한
 JSON 형태로 영속 기록한다. 파일 sink 초기화(부착 시점) 또는 기록(런타임)이
 실패해도 analyzer는 중단되지 않고 stdout 방출을 계속한다(fail-open).
+
+collector/notifier(logback ECS 스키마, `@timestamp`/`log.level`/`service.name`)와
+달리 이 파일 sink는 analyzer native JSON 형태(`ts`/`level`/`logger`/`message`/
+`trace_id`)를 그대로 디스크에 보존한다 — Java(logback)와 Python(표준 `logging`)은
+서로 다른 언어/서비스라 스키마를 강제로 맞추지 않는다(SPEC-OBSV-LOGS-002 §3
+Exclusion #1, REQ-LOGS-002). VictoriaLogs 조회 시의 필드 정합은 vector의
+in-flight transform(DP-2)이 담당하며 디스크 파일은 건드리지 않는다.
+
+회전도 압축이 없다 — logback `SizeAndTimeBasedRollingPolicy`는 회전 시 gzip
+압축(`*.log.gz`)을 무상 제공하지만, Python 표준 `RotatingFileHandler`는 압축을
+지원하지 않아 회전본이 `aaa-analyzer.log.1`처럼 비압축 상태로 남는다. 호스트
+logrotate 등으로 압축을 별도 구현하는 방안은 read-only 컨테이너 내 cron 부재 +
+신규 운영 부담 문제로 기각했다(DP-1 B안 기각 사유). 대신 analyzer는 스캐폴딩·
+저볼륨 단계임을 고려해 상한 자체를 낮게 잡았다 — maxBytes 10 MiB × backupCount 5
+= 약 60 MiB(collector/notifier의 파일당 1GB·총 50GB cap 대비 훨씬 보수적).
+압축이 필요해지면(로그량 증가 시) 별도 SPEC/ADR 후보다.
 """
 
 import json
