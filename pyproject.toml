@@ -21,6 +21,12 @@ dev = [
   "pytest-cov>=6.0",
   "httpx>=0.27",
 ]
+# PSR 컨테이너 액션(python:3.14-slim 기반) 안에는 uv가 없어 build_command가
+# 실행 시점에 직접 설치한다(PSR 공식 uv_integration 가이드 패턴). Dependabot
+# uv 생태계가 이 핀을 자동 갱신한다.
+build = [
+  "uv~=0.11.2",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -60,7 +66,14 @@ allow_zero_version = true
 # version_toml 갱신 후 uv.lock을 재생성해 release 커밋에 함께 포함(assets).
 # 누락 시 다음 릴리즈부터 `uv sync --locked`가 lockfile 불일치로 실패해
 # Docker 빌드가 매번 깨진다(실측: 최초 미스핏 릴리즈에서 재현 확인).
-build_command = "uv lock"
+# PSR 컨테이너 액션에는 uv가 없으므로(실측: v0.2.0 첫 시도 exit 127) pip으로
+# [dependency-groups].build의 uv를 먼저 설치한다(pip 25.1+ --group, 컨테이너
+# python:3.14 이미지 충족). --upgrade-package는 자기 패키지 버전만 lock에
+# 반영하고 다른 핀은 건드리지 않는다($PACKAGE_NAME은 PSR이 주입).
+build_command = """
+python -m pip install --group build
+uv lock --upgrade-package "$PACKAGE_NAME"
+"""
 assets = ["uv.lock"]
 # collector .releaserc.js의 @semantic-release/git message 컨벤션과 동일한 형식
 # (gitmoji + conventional + [skip ci] — 릴리즈 커밋 자체가 Release 워크플로우를
