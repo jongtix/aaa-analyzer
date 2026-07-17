@@ -5,7 +5,7 @@ description = "AAA Phase 2 ML analyzer service — market regime analysis and tr
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
 dependencies = [
-  "fastapi>=0.115",
+  "fastapi>=0.139.2",
   "uvicorn[standard]>=0.51.0",
   "pymysql>=1.1",
   "sqlalchemy>=2.0",
@@ -15,7 +15,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-  "ruff>=0.15.21",
+  "ruff>=0.15.22",
   "pyright>=1.1.390",
   "pytest>=8.3",
   "pytest-cov>=6.0",
