@@ -16,7 +16,13 @@ COPY README.md ./
 RUN uv sync --locked --no-dev
 
 # === Runtime stage ===
-FROM python:3.14-slim@sha256:8e4071294d046d45b31a902e02a8560a45c351898513b66ec659ca39fd30d170
+# digest 재핀(2026-07-25): python:3.14-slim(3.14.6-slim-trixie) linux/amd64 최신 digest로 갱신.
+# 재확인: `docker buildx imagetools inspect python:3.14-slim`
+# apt-get upgrade 생략(의도적): 재핀 후 Trivy 재스캔 결과 잔여 CRITICAL/HIGH 23건이 전부
+# Debian trixie 상류에 fix 자체가 없는 unfixed 상태(perl-base/util-linux/ncurses 등 시스템
+# 유틸리티) — apt-get upgrade는 저장소에 패치가 있어야 의미가 있어 여기선 무력하다.
+# 게이트는 --ignore-unfixed로 이 잔여를 정책적으로 처리한다(REQ-CVE-021).
+FROM python:3.14-slim@sha256:d4fea6e20c09820028eea3f5c17f5b8ebd2ecb9c2bf28e561681a74a96090e4f
 
 # 비루트 유저 생성(UID 1005 — collector UID 1004와 비충돌, Debian 계열 groupadd/useradd)
 RUN groupadd -g 1005 analyzer \
