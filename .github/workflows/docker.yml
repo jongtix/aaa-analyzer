@@ -72,7 +72,36 @@ jobs:
         if: ${{ steps.tag.outputs.valid == 'true' }}
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-      - name: Build and push
+      # 로컬 적재만 수행 (push 아님) — Trivy 스캔 통과 후에만 별도 push 스텝에서 GHCR에 반영한다
+      - name: Build (local load for scan)
+        if: ${{ steps.tag.outputs.valid == 'true' }}
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          load: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # CVE 게이트: CRITICAL/HIGH 발견 시 exit-code 1로 job 실패 (fail-closed, || true·continue-on-error 금지)
+      # ignore-unfixed: analyzer는 시스템 유틸리티 unfixed 잔여 23건이 있어 이 플래그 없이는 게이트를 켤 수 없다 (REQ-CVE-021)
+      # trivyignores 파라미터는 명시하지 않는다 — 명시 시 파일 부재가 에러가 되므로,
+      # 레포 루트 .trivyignore를 trivy 기본 동작(있으면 자동 적용, 없으면 무시)에 맡긴다 (REQ-CVE-017)
+      - name: Trivy CVE scan
+        if: ${{ steps.tag.outputs.valid == 'true' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:${{ steps.tag.outputs.tag }}
+          format: table
+          severity: CRITICAL,HIGH
+          scanners: vuln
+          vuln-type: os,library
+          ignore-unfixed: true
+          exit-code: '1'
+
+      - name: Push
         if: ${{ steps.tag.outputs.valid == 'true' }}
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
