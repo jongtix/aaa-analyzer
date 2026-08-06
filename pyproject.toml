@@ -11,6 +11,7 @@ dependencies = [
   "sqlalchemy>=2.0",
   "apscheduler>=3,<4",
   "prometheus-client>=0.26.0",
+  "pandas>=3.0.5",
 ]
 
 [dependency-groups]
