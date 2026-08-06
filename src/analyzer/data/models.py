@@ -12,7 +12,7 @@ REQ-AD-010/011/012에 대응.
 """
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,11 +60,29 @@ class MarketCalendarRow:
 class TradingCalendar:
     """`market_calendar` 조회 결과를 감싸는 거래일 판정 컨테이너.
 
-    M1은 타입 구조(calendar_code + 거래일 집합)만 확정한다 — `prevTradingDay`/
-    `lastTradingDayOnOrBefore` 같은 거래일 판정 로직은 M2(배당락일 파생 함수)에서
-    이 타입을 인자로 받는 순수 함수로 구현된다(§4.2, DB 비의존 단위 테스트 용이성
-    확보 목적).
+    M2(배당락일 파생 함수, spec.md §4.2)가 요구하는 거래일 판정 메서드
+    (`is_trading_day`/`last_trading_day_on_or_before`/`prev_trading_day`)를
+    제공한다 — DB에 직접 의존하지 않고 `trading_days` 집합만으로 판정하므로
+    단위 테스트가 DB 접근 없이 가능하다.
     """
 
     calendar_code: str
     trading_days: frozenset[date]
+
+    def is_trading_day(self, d: date) -> bool:
+        """`d`가 거래일이면 True."""
+        return d in self.trading_days
+
+    def last_trading_day_on_or_before(self, d: date) -> date:
+        """`d` 당일을 포함해 그 이전(과거 방향)으로 처음 만나는 거래일을 반환한다."""
+        current = d
+        while current not in self.trading_days:
+            current -= timedelta(days=1)
+        return current
+
+    def prev_trading_day(self, d: date) -> date:
+        """`d` 당일은 제외하고, `d`보다 이전(과거 방향)으로 처음 만나는 거래일을 반환한다."""
+        current = d - timedelta(days=1)
+        while current not in self.trading_days:
+            current -= timedelta(days=1)
+        return current

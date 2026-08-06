@@ -109,3 +109,54 @@ class TestTradingCalendar:
 
         with pytest.raises(AttributeError):
             calendar.calendar_code = "NYSE"  # type: ignore[misc]
+
+
+class TestTradingCalendarJudgmentMethods:
+    """M2(spec.md §4.2): 거래일 판정 메서드 — DB 비의존, 순수 함수."""
+
+    @staticmethod
+    def _build_calendar() -> TradingCalendar:
+        # 2023-12: 26(화)/27(수)/28(목) 거래, 29(금)/30(토)/31(일) 휴장(연말 폐장).
+        # 2024-02: 7(수)/8(목)/9(금) 거래, 10~12(토~월) 연휴 휴장, 13(화) 거래.
+        trading_days = frozenset(
+            {
+                date(2023, 12, 26),
+                date(2023, 12, 27),
+                date(2023, 12, 28),
+                date(2024, 2, 7),
+                date(2024, 2, 8),
+                date(2024, 2, 9),
+                date(2024, 2, 13),
+            }
+        )
+        return TradingCalendar(calendar_code="KRX", trading_days=trading_days)
+
+    def test_is_trading_day_true_for_trading_day(self):
+        calendar = self._build_calendar()
+
+        assert calendar.is_trading_day(date(2023, 12, 27)) is True
+
+    def test_is_trading_day_false_for_closed_day(self):
+        calendar = self._build_calendar()
+
+        assert calendar.is_trading_day(date(2023, 12, 31)) is False
+
+    def test_last_trading_day_on_or_before_returns_self_when_trading_day(self):
+        calendar = self._build_calendar()
+
+        assert calendar.last_trading_day_on_or_before(date(2023, 12, 28)) == date(2023, 12, 28)
+
+    def test_last_trading_day_on_or_before_skips_year_end_closure(self):
+        calendar = self._build_calendar()
+
+        assert calendar.last_trading_day_on_or_before(date(2023, 12, 31)) == date(2023, 12, 28)
+
+    def test_prev_trading_day_excludes_self(self):
+        calendar = self._build_calendar()
+
+        assert calendar.prev_trading_day(date(2023, 12, 28)) == date(2023, 12, 27)
+
+    def test_prev_trading_day_skips_consecutive_holiday_cluster(self):
+        calendar = self._build_calendar()
+
+        assert calendar.prev_trading_day(date(2024, 2, 13)) == date(2024, 2, 9)
