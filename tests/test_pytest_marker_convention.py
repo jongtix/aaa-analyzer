@@ -22,10 +22,22 @@ _NO_TESTS_COLLECTED = 5
 # collection 대상에 절대 포함되면 안 된다: 포함될 경우 생성된 pytest 프로세스가
 # 바로 이 테스트를 재선택(및 재생성)하게 되어, 리소스가 고갈될 때까지 재귀가
 # 계속된다.
+#
+# `tests/test_data_adjustment_e2e.py`는 의도적으로 제외한다: 그 파일은 실
+# `@pytest.mark.integration` 테스트를 포함하므로 포함시키면
+# `test_dash_m_integration_selects_zero_tests_successfully`의 "0개 선택"
+# 불변식이 깨진다(SPEC-ANALYZER-DATA-001 M7).
 _NON_META_TEST_FILES = [
     "tests/test_logging_trace.py",
     "tests/test_api.py",
     "tests/test_inference_cli.py",
+    "tests/test_data_models.py",
+    "tests/test_data_config.py",
+    "tests/test_data_adjustment.py",
+    "tests/test_data_dividend.py",
+    "tests/test_data_split.py",
+    "tests/test_data_dividend_adjustment.py",
+    "tests/test_data_repository.py",
 ]
 
 

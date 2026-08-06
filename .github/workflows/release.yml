@@ -34,10 +34,13 @@ jobs:
       - name: Pyright
         run: uv run pyright
 
-      - name: Pytest (full suite + coverage gate)
-        # 통합 포함 전체 실행. --cov-fail-under=85는 pyproject.toml addopts에 배선됨
-        # (REQ-ANALYZER-FOUNDATION-025).
-        run: uv run pytest
+      - name: Pytest (integration 제외 + coverage gate)
+        # integration 마커(@pytest.mark.integration)는 실 DB 접속을 요구하므로
+        # CI에서 제외한다(SPEC-ANALYZER-DATA-001 M7 결정 — 옵션 b: 로컬/수동 검증
+        # 의존, CI에 MySQL 서비스 컨테이너를 추가하는 운영 비용이 1인 프로젝트
+        # 규모의 이득을 상회). --cov-fail-under=85는 pyproject.toml addopts에
+        # 배선됨(REQ-ANALYZER-FOUNDATION-025).
+        run: uv run pytest -m "not integration"
 
   release:
     needs: test
