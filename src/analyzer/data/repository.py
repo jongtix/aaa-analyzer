@@ -51,6 +51,15 @@ _CORPORATE_EVENTS_QUERY = text(
     "ORDER BY e.event_date"
 )
 
+_INVESTOR_TREND_QUERY = text(
+    "SELECT s.symbol AS stock_code, i.trade_date, i.foreign_net_value, "
+    "i.institution_net_value, i.individual_net_value, i.total_trading_value "
+    "FROM investor_trend i "
+    "JOIN stocks s ON s.id = i.stock_id "
+    "WHERE s.symbol = :stock_code "
+    "ORDER BY i.trade_date"
+)
+
 
 def build_engine(config: DbConfig) -> Engine:
     """`DbConfig`로부터 커넥션 풀링을 지원하는 SQLAlchemy 엔진을 구성한다(REQ-AD-010)."""
@@ -97,6 +106,32 @@ def fetch_corporate_events(engine: Engine, stock_code: str) -> pd.DataFrame:
         raise ValueError("stock_code는 비어 있을 수 없다")
 
     return pd.read_sql(_CORPORATE_EVENTS_QUERY, engine, params={"stock_code": stock_code})
+
+
+def fetch_investor_trend(engine: Engine, stock_code: str) -> pd.DataFrame:
+    """`investor_trend`에서 1개 종목의 수급 데이터를 읽는다(REQ-AF-010).
+
+    `trade_date`만 SELECT/ORDER BY 대상으로 사용하고 `created_at`/`updated_at`은
+    쿼리에 포함하지 않는다(REQ-AF-051 — DATE 전용 조인·정렬 키).
+    """
+    if not stock_code:
+        raise ValueError("stock_code는 비어 있을 수 없다")
+
+    return pd.read_sql(_INVESTOR_TREND_QUERY, engine, params={"stock_code": stock_code})
+
+
+def iter_investor_trend_by_stock(
+    engine: Engine,
+    stock_codes: Sequence[str],
+) -> Iterator[pd.DataFrame]:
+    """시장 전체 수급 데이터 요청을 종목 단위 청크로 순회한다(REQ-AF-011, AC-AF-014).
+
+    `iter_daily_ohlcv_by_stock`과 동일하게 제너레이터이므로 호출 시점에는
+    아무 쿼리도 실행되지 않고, 각 청크가 소비될 때마다 `fetch_investor_trend`가
+    정확히 1개 종목코드로 호출된다.
+    """
+    for stock_code in stock_codes:
+        yield fetch_investor_trend(engine, stock_code)
 
 
 def iter_daily_ohlcv_by_stock(
