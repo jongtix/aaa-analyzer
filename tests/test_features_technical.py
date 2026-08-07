@@ -142,7 +142,7 @@ class TestNaNPropagationOnInsufficientObservations:
         result = compute_technical_features(df)
 
         for col in ("ROC_5", "MA_5", "STD_5", "RANK_5", "CORR_5"):
-            assert result[col].isna().all(), col
+            assert bool(result[col].isna().all()), col
 
 
 class TestAllTechnicalFeaturesClassifiable:
