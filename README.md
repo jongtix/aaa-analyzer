@@ -4,8 +4,9 @@ AAA(Algorithmic Alpha Advisor) Phase 2 ML 분석 서비스. 시장 데이터 기
 
 > 본 레포의 현재 상태는 SPEC-ANALYZER-FOUNDATION-001(스캐폴딩 + 프로세스 골격 + CI/CD 기반) +
 > SPEC-ANALYZER-SCHEMA-001(DB 스키마 정합) + SPEC-ANALYZER-DATA-001(DB 읽기 계층 + SPLIT/DIVIDEND
-> 가격 조정 엔진) 범위로 한정된다.
-> 피처/레이블/학습 로직은 후속 SPEC(FEATURE-001/LABEL-001/INFER-001/TRAIN-001 등)에서 구현된다.
+> 가격 조정 엔진) + SPEC-ANALYZER-FEATURE-001(기술적 지표 25종 + 수급 피처 15종 + 가격파생/동결 분류
+> 레지스트리) 범위로 한정된다.
+> 레이블/학습 로직은 후속 SPEC(LABEL-001/INFER-001/TRAIN-001 등)에서 구현된다.
 
 ## Stack
 
@@ -20,7 +21,7 @@ AAA(Algorithmic Alpha Advisor) Phase 2 ML 분석 서비스. 시장 데이터 기
 src/analyzer/
 ├── common/         # 구조화 로깅, Trace ID 등 공통 유틸
 ├── data/           # DB 읽기 계층 + SPLIT/DIVIDEND 가격 조정 엔진(as-of point-in-time)
-├── features/       # 피처 계산 (후속 SPEC)
+├── features/       # 기술적 지표(KBAR+ROC/MA/STD/RANK/CORR) + 수급 피처 + PRICE_DERIVED/FROZEN 분류 레지스트리
 ├── labels/         # 레이블 생성 (후속 SPEC)
 ├── training/        # 모델 학습 (후속 SPEC)
 ├── inference/       # 완결형 자식 CLI 추론 진입점
