@@ -130,3 +130,77 @@ class TestTrainPooledModels:
 
         with pytest.raises(ValueError, match="조합"):
             train_pooled_models(data)
+
+
+class TestNativeEarlyStopping:
+    """REQ-AT-105: LightGBM/XGBoost 네이티브 조기 종료 — trial 자신의 검증 지표
+    개선이 멈추면 그 trial의 부스팅 자체를 멈춘다(프루닝과 무관하게 적용).
+    """
+
+    def test_early_stopping_actually_stops_boosting_before_max_estimators(self):
+        rng = np.random.default_rng(123)
+        n = 200
+        x = rng.normal(size=(n, 3))
+        y = x @ np.array([0.02, -0.01, 0.015]) + rng.normal(scale=0.01, size=n)
+        x_train, y_train = x[:150], y[:150]
+        x_val, y_val = x[150:], y[150:]
+
+        data_by_combo = {
+            (market, horizon): (x_train, y_train) for market in MARKETS for horizon in HORIZONS
+        }
+        eval_data_by_combo = {
+            (market, horizon): (x_val, y_val) for market in MARKETS for horizon in HORIZONS
+        }
+
+        models = train_pooled_models(
+            data_by_combo,
+            lgbm_params={"n_estimators": 500, "verbosity": -1},
+            xgb_params={"n_estimators": 500, "verbosity": 0},
+            eval_data_by_combo=eval_data_by_combo,
+            early_stopping_rounds=5,
+        )
+
+        lgbm_model = models[("domestic", 20, "lightgbm")]
+        xgb_model = models[("domestic", 20, "xgboost")]
+        assert isinstance(lgbm_model, LGBMRegressor)
+        assert isinstance(xgb_model, XGBRegressor)
+
+        assert lgbm_model.best_iteration_ < 500
+        assert xgb_model.best_iteration < 500
+
+    def test_without_eval_data_early_stopping_is_not_applied(self):
+        """eval_data_by_combo가 없으면 조기 종료 없이 요청한 n_estimators 전체를 사용한다."""
+        models = train_pooled_models(
+            _full_data_by_combo(),
+            lgbm_params={"n_estimators": 10, "verbosity": -1},
+        )
+
+        lgbm_model = models[("domestic", 20, "lightgbm")]
+        assert isinstance(lgbm_model, LGBMRegressor)
+        assert lgbm_model.n_estimators_ == 10
+
+    def test_quantile_models_also_receive_early_stopping(self):
+        rng = np.random.default_rng(321)
+        n = 200
+        x = rng.normal(size=(n, 3))
+        y = x @ np.array([0.02, -0.01, 0.015]) + rng.normal(scale=0.01, size=n)
+        x_train, y_train = x[:150], y[:150]
+        x_val, y_val = x[150:], y[150:]
+
+        data_by_combo = {
+            (market, horizon): (x_train, y_train) for market in MARKETS for horizon in HORIZONS
+        }
+        eval_data_by_combo = {
+            (market, horizon): (x_val, y_val) for market in MARKETS for horizon in HORIZONS
+        }
+
+        models = train_pooled_models(
+            data_by_combo,
+            lgbm_params={"n_estimators": 500, "verbosity": -1},
+            eval_data_by_combo=eval_data_by_combo,
+            early_stopping_rounds=5,
+        )
+
+        quantile_model = models[("domestic", 20, "lightgbm_quantile", 0.10)]
+        assert isinstance(quantile_model, LGBMRegressor)
+        assert quantile_model.best_iteration_ < 500
