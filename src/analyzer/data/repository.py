@@ -26,7 +26,7 @@ from sqlalchemy.engine import Engine
 from analyzer.data.config import DbConfig
 from analyzer.data.models import TradingCalendar
 
-_DB_USER = "analyzer"
+_ANALYZER_DB_USER = "analyzer"
 
 _MARKET_CALENDAR_QUERY = text(
     "SELECT calendar_code, cal_date, is_open "
@@ -63,7 +63,7 @@ _INVESTOR_TREND_QUERY = text(
 
 def build_engine(config: DbConfig) -> Engine:
     """`DbConfig`로부터 커넥션 풀링을 지원하는 SQLAlchemy 엔진을 구성한다(REQ-AD-010)."""
-    url = f"mysql+pymysql://{_DB_USER}:{config.password}@{config.host}:{config.port}/{config.database}"
+    url = f"mysql+pymysql://{_ANALYZER_DB_USER}:{config.password}@{config.host}:{config.port}/{config.database}"
     return create_engine(url, pool_pre_ping=True)
 
 
