@@ -22,12 +22,21 @@ import pandas as pd
 # 동일 패턴 계승)이 이 조립 경로에서도 재발하지 않도록 방어한다.
 import analyzer.data.dividend_adjustment  # noqa: F401
 import analyzer.data.split  # noqa: F401
-from analyzer.data.adjustment import adjust_prices
+from analyzer.data.adjustment import HANDLER_REGISTRY, adjust_prices
 from analyzer.data.models import TradingCalendar
 from analyzer.features.supply_demand import compute_supply_demand_features
 from analyzer.features.technical import compute_technical_features
 from analyzer.labels.config import DEFAULT_START_DATES
 from analyzer.labels.core import compute_labels
+
+# REQ-AT-021 명시적 가드(AC-AT-003): 위 import만으로도 SPLIT/DIVIDEND 핸들러가
+# 등록되지만, "동등한 레지스트리 비어있음 방지 assertion"을 이 모듈 로드
+# 시점에 직접 단언해 향후 import 순서 변경 등으로 가드가 조용히 무력화되는
+# 것을 방지한다(fail-fast).
+assert "SPLIT" in HANDLER_REGISTRY and "DIVIDEND" in HANDLER_REGISTRY, (
+    "SPLIT/DIVIDEND 핸들러 레지스트리가 비어 있다 — "
+    "analyzer.data.split/dividend_adjustment 임포트를 확인하라(REQ-AT-021)"
+)
 
 _EMPTY_EVENTS_COLUMNS = [
     "event_type",
