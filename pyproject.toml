@@ -12,6 +12,7 @@ dependencies = [
   "apscheduler>=3,<4",
   "prometheus-client>=0.26.0",
   "pandas>=3.0.5",
+  "pyarrow>=19.0",
 ]
 
 [dependency-groups]
