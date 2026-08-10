@@ -48,6 +48,49 @@ _EMPTY_EVENTS_COLUMNS = [
     "currency_code",
 ]
 
+_ASSEMBLED_DATASET_COLUMNS = [
+    "stock_code",
+    "trade_date",
+    "open_price",
+    "high_price",
+    "low_price",
+    "close_price",
+    "volume",
+    "KMID",
+    "KLEN",
+    "KUP",
+    "KLOW",
+    "KSFT",
+    "ROC_5",
+    "MA_5",
+    "STD_5",
+    "RANK_5",
+    "CORR_5",
+    "ROC_10",
+    "MA_10",
+    "STD_10",
+    "RANK_10",
+    "CORR_10",
+    "ROC_20",
+    "MA_20",
+    "STD_20",
+    "RANK_20",
+    "CORR_20",
+    "ROC_60",
+    "MA_60",
+    "STD_60",
+    "RANK_60",
+    "CORR_60",
+    "label_D20",
+    "label_D20_exclude_reason",
+    "label_D60",
+    "label_D60_exclude_reason",
+]
+"""빈 유니버스(§B 경계 사례)일 때도 스키마를 유지하기 위한 기준 컬럼 목록 —
+`compute_technical_features()`/`compute_labels()`가 항상 산출하는 열만
+포함한다(수급 피처는 종목별 `investor_trend` 존재 여부에 따라 조건부로만
+병합되므로 기준 스키마에서 제외 — REQ-AT-020 docstring 참조)."""
+
 
 def assemble_dataset(
     stocks: pd.DataFrame,
@@ -124,6 +167,6 @@ def assemble_dataset(
         assembled.append(merged)
 
     if not assembled:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=_ASSEMBLED_DATASET_COLUMNS)
 
     return pd.concat(assembled, ignore_index=True)
