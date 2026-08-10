@@ -146,6 +146,59 @@ class TestAssembleDataset:
         assert result["trade_date"].min() >= date(2007, 8, 20)
 
 
+class TestAssembleDatasetEmptyUniverse:
+    """§B 경계 사례: 유니버스 필터 통과 종목이 0개면 빈 DataFrame(스키마는
+    유지)을 반환해야 하며 예외를 던지지 않는다."""
+
+    def test_empty_stocks_input_returns_schema_preserving_empty_dataframe(self):
+        calendar = _calendar(date(2004, 12, 1), date(2005, 3, 1))
+        empty_stocks = pd.DataFrame(columns=["stock_code", "grade", "delisted_at"])
+
+        result = assemble_dataset(
+            stocks=empty_stocks,
+            ohlcv_by_stock={},
+            events_by_stock={},
+            investor_trend_by_stock={},
+            calendar=calendar,
+            market="domestic",
+        )
+
+        assert result.empty
+        assert "stock_code" in result.columns
+        assert "trade_date" in result.columns
+        assert "label_D20" in result.columns
+        assert "label_D60_exclude_reason" in result.columns
+        assert len(result.columns) > 0
+
+    def test_all_c_grade_universe_returns_schema_preserving_empty_dataframe(self):
+        """등급 필터로 전원 제외되는 경우(유니버스 존재하나 필터 후 0개)도 동일."""
+        calendar = _calendar(date(2004, 12, 1), date(2005, 3, 1))
+        stocks = pd.DataFrame({"stock_code": ["CGRADE"], "grade": ["C"], "delisted_at": [None]})
+
+        result = assemble_dataset(
+            stocks=stocks,
+            ohlcv_by_stock={
+                "CGRADE": _ohlcv("CGRADE", _weekdays(date(2005, 1, 3), date(2005, 1, 10)))
+            },
+            events_by_stock={"CGRADE": _empty_events()},
+            investor_trend_by_stock={},
+            calendar=calendar,
+            market="domestic",
+        )
+
+        assert result.empty
+        assert list(result.columns) == list(
+            assemble_dataset(
+                stocks=pd.DataFrame({"stock_code": [], "grade": [], "delisted_at": []}),
+                ohlcv_by_stock={},
+                events_by_stock={},
+                investor_trend_by_stock={},
+                calendar=calendar,
+                market="domestic",
+            ).columns
+        )
+
+
 class TestAssembleDatasetSupplyDemand:
     """REQ-AT-020: investor_trend가 있는 종목은 수급 피처가 병합되어야 한다."""
 
