@@ -26,7 +26,7 @@ dev = [
 # 실행 시점에 직접 설치한다(PSR 공식 uv_integration 가이드 패턴). Dependabot
 # uv 생태계가 이 핀을 자동 갱신한다.
 build = [
-  "uv~=0.12.0",
+  "uv~=0.12.2",
 ]
 
 [build-system]
