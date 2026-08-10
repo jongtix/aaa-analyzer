@@ -135,6 +135,23 @@ class TestApplyRetentionPolicy:
         archive_path = tmp_path / "archive" / f"{result.archived_months[0]}.tar.zst"
         assert archive_path.exists()
 
+    def test_boundary_exactly_13_versions_yields_12_active_1_archived(self, tmp_path: Path):
+        """§B 경계 사례: 정확히 13번째 버전(active 12개 + 아카이브 1개 전환점).
+
+        `<=12`(전부 active, 아카이브 없음) vs `<13`(1개만 아카이브)의 오적용을
+        구분하는 명시적 테스트 — 12개는 `<=12` 분기로 잘못 빠지면 전부 active로
+        남아 이 테스트가 실패한다.
+        """
+        versions = self._make_versions(tmp_path, 13)
+
+        result = apply_retention_policy(versions, tmp_path / "archive", active_count=12)
+
+        assert len(result.active) == 12
+        assert result.active == sorted(versions, key=lambda v: v.trained_date)[-12:]
+        assert len(result.archived_months) == 1
+        archived_version = sorted(versions, key=lambda v: v.trained_date)[0]
+        assert archived_version not in result.active
+
     def test_ac_at_009_staged_originals_deleted_after_successful_archive(self, tmp_path: Path):
         versions = self._make_versions(tmp_path, 15)
         to_be_archived = sorted(versions, key=lambda v: v.trained_date)[:3]

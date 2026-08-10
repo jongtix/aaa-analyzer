@@ -85,6 +85,27 @@ class TestReportFoldAndMaybePrune:
 
         assert call_log == [0, 1, 2, 3]
 
+    def test_first_trial_of_fresh_study_completes_without_comparison_baseline(self, tmp_path: Path):
+        """§B 경계 사례: 신규 study의 첫 trial(비교 대상 없음)에서도 정상 진행.
+
+        `MedianPruner`는 비교할 완료 trial이 없으면 프루닝을 발동시키지 않아야
+        한다 — warm-up 없이 곧바로 trial #0에서 호출되는 첫 케이스를 검증한다
+        (기존 테스트들은 모두 5-trial warm-up 이후의 trial을 대상으로 했음).
+        """
+        study = create_or_resume_study(tmp_path, "domestic", 20)
+        fold_calls: list[int] = []
+
+        def first_trial_objective(trial: optuna.Trial) -> float:
+            for fold_index in range(4):
+                fold_calls.append(fold_index)
+                report_fold_and_maybe_prune(trial, fold_index, fold_metric=1.0)
+            return 1.0
+
+        study.optimize(first_trial_objective, n_trials=1)
+
+        assert fold_calls == [0, 1, 2, 3]
+        assert study.trials[0].state == optuna.trial.TrialState.COMPLETE
+
     def test_ac_at_010_quantile_training_function_never_touches_optuna_trial(self):
         """AC-AT-010 별도 확인: 분위수 보조 모델 학습 함수가 Optuna trial을 전혀 참조하지 않는다."""
         result = subprocess.run(
