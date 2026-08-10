@@ -34,16 +34,25 @@ class TestComputeBacktestMetrics:
 
         assert metrics.hit_rate == pytest.approx(0.60, abs=0.05)
 
-    def test_ac_at_013_ic_matches_spearman_definition(self):
+    def test_ac_at_013_rank_ic_matches_spearman_definition(self):
         scores, returns = _synthetic_60pct_direction_match()
         confidences = np.full_like(scores, 0.7)
 
         metrics = compute_backtest_metrics(scores, returns, confidences)
 
-        expected_ic, _pvalue = stats.spearmanr(scores, returns)
-        assert metrics.ic == pytest.approx(expected_ic, abs=1e-9)
+        expected_rank_ic, _pvalue = stats.spearmanr(scores, returns)
+        assert metrics.rank_ic == pytest.approx(expected_rank_ic, abs=1e-9)
 
-    def test_ac_at_013_all_6_metrics_present_and_not_nan(self):
+    def test_ac_at_013_pearson_ic_matches_pearson_definition(self):
+        scores, returns = _synthetic_60pct_direction_match()
+        confidences = np.full_like(scores, 0.7)
+
+        metrics = compute_backtest_metrics(scores, returns, confidences)
+
+        expected_pearson_ic, _pvalue = stats.pearsonr(scores, returns)
+        assert metrics.pearson_ic == pytest.approx(expected_pearson_ic, abs=1e-9)
+
+    def test_ac_at_013_all_7_metrics_present_and_not_nan(self):
         scores, returns = _synthetic_60pct_direction_match()
         confidences = np.full_like(scores, 0.7)
 
@@ -52,13 +61,14 @@ class TestComputeBacktestMetrics:
         assert isinstance(metrics, BacktestMetrics)
         values = [
             metrics.hit_rate,
-            metrics.ic,
+            metrics.pearson_ic,
+            metrics.rank_ic,
             metrics.precision,
             metrics.sharpe_ratio,
             metrics.max_drawdown,
             metrics.confidence_calibration,
         ]
-        assert len(values) == 6
+        assert len(values) == 7
         for value in values:
             assert not np.isnan(value)
 
