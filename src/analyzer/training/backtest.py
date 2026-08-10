@@ -1,11 +1,14 @@
 """초기 백테스트 지표 산출 (SPEC-ANALYZER-TRAIN-001 M7).
 
-REQ-AT-120: 6개 지표를 계산한다 — Hit Rate(방향 적중률), IC(score-실현
-수익률 순위상관, TECHSPEC §6.4가 명시하는 회귀 신호 평가의 1차 축;
-스피어만 순위상관 정의를 그대로 사용하며 통상 "Rank IC"로도 불리는
-동일 값이다), Precision by direction(방향성 예측 중 실제 방향이 맞은
-비율), Sharpe ratio, Max Drawdown, confidence 캘리브레이션 정확도
-(예측 confidence 구간별 실측 방향 적중률 대조).
+REQ-AT-120: 7개 지표를 계산한다 — Hit Rate(방향 적중률), Pearson IC(score-
+실현수익률 피어슨 상관), Rank IC(score-실현수익률 스피어만 순위상관,
+TECHSPEC §6.4가 명시하는 회귀 신호 평가의 1차 축 — ADR-033), Precision
+by direction(방향성 예측 중 실제 방향이 맞은 비율), Sharpe ratio, Max
+Drawdown, confidence 캘리브레이션 정확도(예측 confidence 구간별 실측
+방향 적중률 대조). Pearson IC/Rank IC를 별도 필드로 분리하는 것은 업계
+표준 관행(Qlib이 `ic`/`rank_ic`를 별도 컬럼으로 산출)과 일치하며, 두 값의
+괴리 자체가 진단 신호다(Pearson만 높으면 소수 이상치가 상관을 견인 중,
+Rank만 높으면 비선형 관계가 존재).
 
 REQ-AT-121: 회귀 R²이 구조적으로 낮게 나오는 것은 결함이 아니라 인지된
 한계로 취급한다(ADR-033 — IC/Rank IC가 실질적 평가축) — 이 모듈은 R²을
@@ -23,10 +26,11 @@ _N_CALIBRATION_BINS = 5
 
 @dataclass(frozen=True, slots=True)
 class BacktestMetrics:
-    """AC-AT-013이 요구하는 6개 백테스트 지표(REQ-AT-120)."""
+    """AC-AT-013이 요구하는 7개 백테스트 지표(REQ-AT-120)."""
 
     hit_rate: float
-    ic: float
+    pearson_ic: float
+    rank_ic: float
     precision: float
     sharpe_ratio: float
     max_drawdown: float
@@ -38,8 +42,15 @@ def _hit_rate(scores: np.ndarray, returns: np.ndarray) -> float:
     return float(np.mean(np.sign(scores) == np.sign(returns)))
 
 
-def _ic(scores: np.ndarray, returns: np.ndarray) -> float:
-    """score와 실현수익률의 스피어만 순위상관(REQ-AT-120 "IC/Rank IC")."""
+def _pearson_ic(scores: np.ndarray, returns: np.ndarray) -> float:
+    """score와 실현수익률의 피어슨 상관(REQ-AT-120 "Pearson IC")."""
+    # scipy 1.18 `PearsonRResult`의 pyright stub이 필드를 제네릭 `_T_co`로만
+    # 선언해 float() 변환 인자 타입이 좁혀지지 않는다(런타임은 정상 float64).
+    return float(stats.pearsonr(scores, returns)[0])  # pyright: ignore[reportArgumentType]
+
+
+def _rank_ic(scores: np.ndarray, returns: np.ndarray) -> float:
+    """score와 실현수익률의 스피어만 순위상관(REQ-AT-120 "Rank IC")."""
     correlation, _pvalue = stats.spearmanr(scores, returns)
     return float(correlation)
 
@@ -114,17 +125,18 @@ def compute_backtest_metrics(
     returns: np.ndarray,
     confidences: np.ndarray,
 ) -> BacktestMetrics:
-    """6개 백테스트 지표를 계산한다(REQ-AT-120, AC-AT-013).
+    """7개 백테스트 지표를 계산한다(REQ-AT-120, AC-AT-013).
 
     `scores`/`returns`/`confidences`는 동일 길이의 병렬 배열이다 —
     각 인덱스가 동일 (종목, 거래일) 예측·실현·confidence 삼중항을
-    나타낸다. 6개 지표 모두 NaN 없이 반환한다(AC-AT-013).
+    나타낸다. 7개 지표 모두 NaN 없이 반환한다(AC-AT-013).
     """
     strategy_returns = _strategy_returns(scores, returns)
 
     return BacktestMetrics(
         hit_rate=_hit_rate(scores, returns),
-        ic=_ic(scores, returns),
+        pearson_ic=_pearson_ic(scores, returns),
+        rank_ic=_rank_ic(scores, returns),
         precision=_precision(scores, returns),
         sharpe_ratio=_sharpe_ratio(strategy_returns),
         max_drawdown=_max_drawdown(strategy_returns),
