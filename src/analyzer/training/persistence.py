@@ -168,7 +168,9 @@ def _verify_archive_integrity(archive_path: Path, versions: Sequence[ModelVersio
                     if _sha256_of_bytes(data) != expected_by_name[member.name]:
                         return False
                     found_names.add(member.name)
-    except tarfile.TarError, OSError:
+    except tarfile.TarError:
+        return False
+    except OSError:
         return False
 
     required = {"manifest.json", *expected_by_name.keys()}
