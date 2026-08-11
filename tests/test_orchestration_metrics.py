@@ -1,0 +1,129 @@
+"""Prometheus 계측 테스트 (REQ-ATA-070/071, acceptance.md §C.1 매핑 보강).
+
+`TrainingMetrics`는 격리된 `CollectorRegistry`를 주입받아 테스트 간 전역 레지스트리
+상태 오염을 피한다. 이 SPEC의 analyzer 측 책임은 올바른 메트릭 발행에 한정되며
+(REQ-ATA-071), vmalert 알람 규칙 YAML은 작성하지 않는다 — 아래 스모크 테스트는
+`prometheus_client` 레지스트리에서 실제로 스크레이프 가능한지만 검증한다.
+"""
+
+from prometheus_client import CollectorRegistry, generate_latest
+
+from analyzer.orchestration.metrics import (
+    LAST_SUCCESS_TIMESTAMP_NAME,
+    MODEL_STALE_NAME,
+    TRAINING_RUN_TOTAL_NAME,
+    TrainingMetrics,
+)
+
+
+class TestTrainingMetricsSuccess:
+    """AC-ATA-001: 성공 경로 Prometheus 메트릭 발행(REQ-ATA-070)."""
+
+    def test_record_success_increments_counter_and_sets_gauge(self):
+        registry = CollectorRegistry()
+        metrics = TrainingMetrics(registry=registry)
+
+        metrics.record_success(market="domestic", horizon=5, algorithm="lightgbm", timestamp=1000.0)
+
+        counter_value = registry.get_sample_value(
+            TRAINING_RUN_TOTAL_NAME, {"stage": "success", "outcome": "success"}
+        )
+        gauge_value = registry.get_sample_value(
+            LAST_SUCCESS_TIMESTAMP_NAME,
+            {"market": "domestic", "horizon": "5", "algorithm": "lightgbm"},
+        )
+        assert counter_value == 1.0
+        assert gauge_value == 1000.0
+
+
+class TestTrainingMetricsFailure:
+    """AC-ATA-002~005: 실패 경로 Prometheus 알람 트리거 시그널(REQ-ATA-061 경유)."""
+
+    def test_record_failure_increments_counter_per_stage(self):
+        registry = CollectorRegistry()
+        metrics = TrainingMetrics(registry=registry)
+
+        metrics.record_failure(stage="wol")
+        metrics.record_failure(stage="wol")
+        metrics.record_failure(stage="ssh")
+
+        wol_value = registry.get_sample_value(
+            TRAINING_RUN_TOTAL_NAME, {"stage": "wol", "outcome": "failure"}
+        )
+        ssh_value = registry.get_sample_value(
+            TRAINING_RUN_TOTAL_NAME, {"stage": "ssh", "outcome": "failure"}
+        )
+        assert wol_value == 2.0
+        assert ssh_value == 1.0
+
+    def test_all_four_failure_stages_are_recordable(self):
+        """REQ-ATA-060: WoL/SSH/학습스크립트/타임아웃 4종 실패가 모두 동일 경로로 기록 가능하다."""
+        registry = CollectorRegistry()
+        metrics = TrainingMetrics(registry=registry)
+
+        for stage in ("wol", "ssh", "training", "timeout"):
+            metrics.record_failure(stage=stage)
+
+        for stage in ("wol", "ssh", "training", "timeout"):
+            value = registry.get_sample_value(
+                TRAINING_RUN_TOTAL_NAME, {"stage": stage, "outcome": "failure"}
+            )
+            assert value == 1.0
+
+
+class TestTrainingMetricsStaleness:
+    """AC-ATA-007: 모델 정체 감지 알람 메트릭(REQ-ATA-072)."""
+
+    def test_record_staleness_sets_gauge_to_one_when_stale(self):
+        registry = CollectorRegistry()
+        metrics = TrainingMetrics(registry=registry)
+
+        metrics.record_staleness(market="overseas", horizon=20, algorithm="xgboost", is_stale=True)
+
+        value = registry.get_sample_value(
+            MODEL_STALE_NAME, {"market": "overseas", "horizon": "20", "algorithm": "xgboost"}
+        )
+        assert value == 1.0
+
+    def test_record_staleness_sets_gauge_to_zero_when_fresh(self):
+        registry = CollectorRegistry()
+        metrics = TrainingMetrics(registry=registry)
+
+        metrics.record_staleness(market="overseas", horizon=20, algorithm="xgboost", is_stale=False)
+
+        value = registry.get_sample_value(
+            MODEL_STALE_NAME, {"market": "overseas", "horizon": "20", "algorithm": "xgboost"}
+        )
+        assert value == 0.0
+
+
+class TestPrometheusScrapeSmoke:
+    """§E Self-Verification: 로컬 `prometheus_client` 레지스트리 스크레이프 스모크 테스트."""
+
+    def test_registry_is_scrapeable_via_generate_latest(self):
+        registry = CollectorRegistry()
+        metrics = TrainingMetrics(registry=registry)
+        metrics.record_success(market="domestic", horizon=5, algorithm="lightgbm", timestamp=1000.0)
+        metrics.record_failure(stage="ssh")
+        metrics.record_staleness(market="domestic", horizon=5, algorithm="lightgbm", is_stale=True)
+
+        output = generate_latest(registry).decode("utf-8")
+
+        assert TRAINING_RUN_TOTAL_NAME in output
+        assert LAST_SUCCESS_TIMESTAMP_NAME in output
+        assert MODEL_STALE_NAME in output
+
+    def test_uses_injected_registry_not_default(self):
+        """레지스트리를 주입하면 `prometheus_client` 전역 기본 레지스트리를
+        오염시키지 않는다 — 테스트 격리 확인(전역 레지스트리 스크레이프 결과에
+        이 인스턴스의 메트릭명이 나타나지 않아야 한다)."""
+        from prometheus_client import REGISTRY
+
+        isolated_registry = CollectorRegistry()
+        TrainingMetrics(registry=isolated_registry)
+
+        default_output = generate_latest(REGISTRY).decode("utf-8")
+        isolated_output = generate_latest(isolated_registry).decode("utf-8")
+
+        assert TRAINING_RUN_TOTAL_NAME not in default_output
+        assert TRAINING_RUN_TOTAL_NAME in isolated_output
