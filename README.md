@@ -6,8 +6,11 @@ AAA(Algorithmic Alpha Advisor) Phase 2 ML 분석 서비스. 시장 데이터 기
 > SPEC-ANALYZER-SCHEMA-001(DB 스키마 정합) + SPEC-ANALYZER-DATA-001(DB 읽기 계층 + SPLIT/DIVIDEND
 > 가격 조정 엔진) + SPEC-ANALYZER-FEATURE-001(기술적 지표 25종 + 수급 피처 15종 + 가격파생/동결 분류
 > 레지스트리) + SPEC-ANALYZER-LABEL-001(실현 수익률 기반 연속 레이블 생성 — T+H as-of 가격 조정,
-> 거래정지·상장폐지 NaN 처리, purge gap) 범위로 한정된다.
-> 학습/추론 로직은 후속 SPEC(INFER-001/TRAIN-001 등)에서 구현된다.
+> 거래정지·상장폐지 NaN 처리, purge gap) + SPEC-ANALYZER-TRAIN-001(FEATURE-001/LABEL-001 산출물로
+> 데이터셋을 조립하고 purged expanding-window walk-forward 검증을 수행, LightGBM+XGBoost ×
+> 시장 2종 × 예측기간 2종의 pooled 모델 16개(quantile 보조 모델 8개 포함) + Optuna 하이퍼파라미터
+> 튜닝을 학습해 앙상블 점수·신뢰도를 산출하고 SHA-256 무결성 검증과 2단계 보존 정책으로 모델을
+> 영속화하는 학습 코어) 범위로 한정된다. 추론 로직은 후속 SPEC(INFER-001 등)에서 구현된다.
 
 ## Stack
 
@@ -24,7 +27,7 @@ src/analyzer/
 ├── data/           # DB 읽기 계층 + SPLIT/DIVIDEND 가격 조정 엔진(as-of point-in-time)
 ├── features/       # 기술적 지표(KBAR+ROC/MA/STD/RANK/CORR) + 수급 피처 + PRICE_DERIVED/FROZEN 분류 레지스트리
 ├── labels/         # 학습 레이블(타깃) 생성 — T+H as-of 가격 조정 기반 실현 수익률, 거래정지/가용범위 NaN 처리, purge gap
-├── training/        # 모델 학습 (후속 SPEC)
+├── training/        # 모델 학습 코어 — 데이터셋 조립, walk-forward 검증, LightGBM+XGBoost 학습, Optuna 튜닝, 앙상블 스코어링, SHA-256 무결성 검증 모델 영속화(진입점: python -m analyzer.training.train)
 ├── inference/       # 완결형 자식 CLI 추론 진입점
 ├── orchestration/   # 스트림 컨슈머·스케줄러 자리(모듈 경계만)
 └── api/             # FastAPI 부모 프로세스 (/health, /metrics)
