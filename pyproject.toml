@@ -19,6 +19,7 @@ dependencies = [
   "xgboost>=3.4.0",
   "optuna>=4.9.0",
   "scipy>=1.18.0",
+  "paramiko>=5.0.0",
 ]
 
 [dependency-groups]
