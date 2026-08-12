@@ -28,6 +28,7 @@ REQ-ATA-051: 이 모듈은 SSH 종료코드 판정 외의 별도 완료 시그�
 (콜백 엔드포인트, 폴링 완료 파일 등)을 도입하지 않는다.
 """
 
+import shlex
 import stat
 import time
 from collections.abc import Callable
@@ -173,19 +174,28 @@ def build_remote_dispatch_command(
     TRAIN-001의 확정된 CLI 계약(`training/train.py` `main()`)을 그대로 소비한다
     — 이 SPEC은 그 계약을 재정의하지 않는다(REQ-ATA-030).
     """
+    quoted_db_tunnel_key_path = shlex.quote(str(db_tunnel_key_path))
+    quoted_db_tunnel_username = shlex.quote(db_tunnel_username)
+    quoted_db_tunnel_host = shlex.quote(db_tunnel_host)
+    quoted_calendar_code = shlex.quote(calendar_code)
+    quoted_cache_dir = shlex.quote(str(cache_dir))
+    quoted_staging_models_root = shlex.quote(str(staging_models_root))
+    quoted_data_as_of = shlex.quote(data_as_of.isoformat())
+    quoted_feature_code_version = shlex.quote(feature_code_version)
+
     tunnel_command = (
         f"ssh -f -N -o BatchMode=yes -o ExitOnForwardFailure=yes "
-        f"-i {db_tunnel_key_path} "
+        f"-i {quoted_db_tunnel_key_path} "
         f"-L {db_tunnel_local_port}:127.0.0.1:{db_tunnel_remote_port} "
-        f"{db_tunnel_username}@{db_tunnel_host}"
+        f"{quoted_db_tunnel_username}@{quoted_db_tunnel_host}"
     )
     train_command = (
         f"python -m analyzer.training.train "
-        f"--calendar-code {calendar_code} "
-        f"--cache-dir {cache_dir} "
-        f"--models-root {staging_models_root} "
-        f"--data-as-of {data_as_of.isoformat()} "
-        f"--feature-code-version {feature_code_version}"
+        f"--calendar-code {quoted_calendar_code} "
+        f"--cache-dir {quoted_cache_dir} "
+        f"--models-root {quoted_staging_models_root} "
+        f"--data-as-of {quoted_data_as_of} "
+        f"--feature-code-version {quoted_feature_code_version}"
     )
     tunnel_pattern = f"{db_tunnel_local_port}:127.0.0.1:{db_tunnel_remote_port}"
     return (
