@@ -232,8 +232,12 @@ def promote_staging_to_active(
     충족한다 — 이 함수 자체는 "호출되지 않으면 활성 경로는 불변"이라는 전제
     위에서만 안전하다.
     """
+    quoted_active_path = shlex.quote(str(active_path))
+    quoted_staging_path = shlex.quote(str(staging_path))
     command = (
-        f"mkdir -p {active_path} && cp -a {staging_path}/. {active_path}/ && rm -rf {staging_path}"
+        f"mkdir -p {quoted_active_path} && "
+        f"cp -a {quoted_staging_path}/. {quoted_active_path}/ && "
+        f"rm -rf {quoted_staging_path}"
     )
     result = connection.exec_command(command, timeout_seconds=timeout_seconds)
     return result.exit_code == 0

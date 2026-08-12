@@ -354,6 +354,21 @@ class TestPromoteStagingToActive:
 
         assert promoted is False
 
+    def test_shell_metacharacters_in_paths_are_safely_quoted(self):
+        """F1과 동일 계열: staging_path/active_path도 shlex.quote로 이스케이프되어야
+        한다 — 그렇지 않으면 공백/셸 메타문자가 섞인 경로가 `rm -rf` 등에서
+        의도치 않은 명령 분리·주입으로 이어질 수 있다."""
+        connection = _FakeSshConnection(command_results=[_stub_result(exit_code=0)])
+        malicious_staging_path = Path("/staging/run 1; rm -rf /")
+        malicious_active_path = Path("/models active")
+
+        promote_staging_to_active(connection, malicious_staging_path, malicious_active_path)
+
+        command, _timeout = connection.executed_commands[0]
+        assert shlex.quote(str(malicious_staging_path)) in command
+        assert shlex.quote(str(malicious_active_path)) in command
+        assert f"rm -rf {malicious_staging_path}" not in command
+
 
 class TestParamikoSshConnectionMockedIO:
     """`self._client`(`paramiko.SSHClient`)를 `MagicMock()`으로 교체해 실 네트워크
