@@ -6,8 +6,9 @@
 모듈이 독립적으로 파일명을 파싱한다.
 """
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from analyzer.orchestration.staleness import detect_stale_models
 
@@ -115,3 +116,29 @@ class TestDetectStaleModels:
 
         assert len(results) == 1
         assert results[0].is_stale is False
+
+    def test_defaults_to_kst_calendar_date_not_system_local(self, tmp_path: Path, monkeypatch):
+        """이 프로젝트는 모든 시각을 KST로 해석한다 — 시스템 로컬 타임존이 달라도
+        `as_of` 미지정 시 KST 캘린더 날짜를 기준으로 판정해야 한다."""
+        import analyzer.orchestration.staleness as staleness_module
+
+        kst_now = datetime(2026, 2, 15, 0, 30, tzinfo=ZoneInfo("Asia/Seoul"))
+        # KST 00:30은 UTC 전날 15:30 — 시스템이 UTC라면 today()는 하루 전 날짜를 반환한다.
+        utc_now = kst_now.astimezone(ZoneInfo("UTC"))
+        assert utc_now.date() != kst_now.date()
+
+        class _FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is not None:
+                    return kst_now.astimezone(tz)
+                return utc_now.replace(tzinfo=None)
+
+        monkeypatch.setattr(staleness_module, "datetime", _FrozenDatetime)
+        _touch_model_file(tmp_path, "domestic", 5, "lightgbm", kst_now.date())
+
+        results = detect_stale_models(tmp_path, threshold_days=28)
+
+        assert len(results) == 1
+        assert results[0].is_stale is False
+        assert results[0].most_recent_trained_date == kst_now.date()

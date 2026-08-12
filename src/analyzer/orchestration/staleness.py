@@ -14,8 +14,11 @@ REQ-ATA-083이 등록하는 전용 일일 cron 잡을 통해 주기적으로 트
 
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+_KST = ZoneInfo("Asia/Seoul")
 
 _MODEL_FILENAME_PATTERN = re.compile(
     r"^(?P<market>[a-z]+)_(?P<horizon>\d+)_(?P<algorithm>[a-z]+)_"
@@ -63,7 +66,7 @@ def detect_stale_models(
     `trained_date` 하나만 기준으로 판정한다 — 오래된 버전이 섞여 있어도 최신
     버전이 신선하면 정체가 아니다.
     """
-    reference_date = as_of if as_of is not None else date.today()
+    reference_date = as_of if as_of is not None else datetime.now(_KST).date()
     latest_by_combo: dict[tuple[str, int, str], date] = {}
 
     for path in models_root.rglob("*"):
