@@ -7,6 +7,7 @@ REQ-ATA-020/021/022/030/031/032/040/041/050/051, AC-ATA-001/003/006/009/011.
 사용하는 통합 테스트만 `@pytest.mark.integration`으로 표시한다(acceptance.md §C).
 """
 
+import shlex
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -293,6 +294,43 @@ class TestBuildRemoteDispatchCommand:
         )
 
         assert command.rstrip().endswith("exit $?") or "exit $TRAIN_EXIT_CODE" in command
+
+    def test_shell_metacharacters_in_interpolated_values_are_safely_quoted(self):
+        """F1: 원격 셸 명령 조립 시 각 값은 shlex.quote로 이스케이프되어야 한다 —
+        그렇지 않으면 값에 셸 메타문자가 섞여도 별도 명령으로 실행될 수 있다."""
+        malicious_calendar_code = "KRX; touch /tmp/pwned"
+
+        command = build_remote_dispatch_command(
+            staging_models_root=Path("/staging/run-1"),
+            calendar_code=malicious_calendar_code,
+            cache_dir=Path("/cache"),
+            data_as_of=date(2026, 8, 11),
+            feature_code_version="v1",
+            db_tunnel_host="nas-ugreen",
+            db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+        )
+
+        # 이스케이프되지 않은 형태(따옴표 없이 노출)로는 존재하지 않아야 한다 —
+        # shlex.quote로 감싸져 셸이 하나의 인자로만 해석해야 한다.
+        assert f"--calendar-code {malicious_calendar_code} " not in command
+        assert shlex.quote(malicious_calendar_code) in command
+
+    def test_all_interpolated_values_pass_through_shlex_quote(self):
+        """공백을 포함한 모든 보간 값이 안전하게 인용되어 하나의 토큰으로
+        유지되어야 한다 — cache_dir, staging_models_root 등."""
+        command = build_remote_dispatch_command(
+            staging_models_root=Path("/staging/run 1"),
+            calendar_code="KRX",
+            cache_dir=Path("/cache dir"),
+            data_as_of=date(2026, 8, 11),
+            feature_code_version="v1",
+            db_tunnel_host="nas-ugreen",
+            db_tunnel_key_path=Path("/run/secrets/db tunnel key"),
+        )
+
+        assert shlex.quote("/staging/run 1") in command
+        assert shlex.quote("/cache dir") in command
+        assert shlex.quote("/run/secrets/db tunnel key") in command
 
 
 class TestPromoteStagingToActive:
