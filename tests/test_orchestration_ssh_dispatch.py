@@ -371,7 +371,42 @@ class TestParamikoSshConnectionMockedIO:
             key_filename=str(tmp_path / "id_ed25519"),
             look_for_keys=False,
             allow_agent=False,
+            timeout=connection._connect_timeout_seconds,  # pyright: ignore[reportAttributeAccessIssue]
         )
+
+    def test_connect_passes_explicit_timeout_to_avoid_unbounded_block(self, tmp_path: Path):
+        """F2: connect()에 timeout이 없으면 paramiko가 무기한 블로킹할 수 있어
+        REQ-ATA-021의 10초×6회 재시도 설계가 무력화된다."""
+        connection = _make_connection_with_mocked_client(tmp_path)
+
+        connection.connect()
+
+        _args, kwargs = connection._client.connect.call_args  # pyright: ignore[reportAttributeAccessIssue]
+        assert "timeout" in kwargs
+        assert isinstance(kwargs["timeout"], (int, float))
+        assert kwargs["timeout"] > 0
+
+    def test_connect_timeout_is_configurable_via_constructor(self, tmp_path: Path):
+        key_path = tmp_path / "id_ed25519"
+        key_path.write_text("fake-key-material")
+        key_path.chmod(0o600)
+        known_hosts_path = tmp_path / "known_hosts"
+        known_hosts_path.write_text("")
+
+        connection = ParamikoSshConnection(
+            host="macbook.local",
+            port=22,
+            username="dispatch",
+            private_key_path=key_path,
+            known_hosts_path=known_hosts_path,
+            connect_timeout_seconds=5.0,
+        )
+        connection._client = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
+
+        connection.connect()
+
+        _args, kwargs = connection._client.connect.call_args  # pyright: ignore[reportAttributeAccessIssue]
+        assert kwargs["timeout"] == 5.0
 
     def test_exec_command_returns_exit_code_from_channel(self, tmp_path: Path):
         connection = _make_connection_with_mocked_client(tmp_path)
