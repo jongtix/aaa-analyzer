@@ -71,13 +71,22 @@ class SchedulerRegistry:
 
 
 def weekly_full_retrain_trigger() -> CronTrigger:
-    """REQ-ATA-081: 주간 전체 재학습 — 주말(토요일) 1회, KST."""
-    return CronTrigger(day_of_week="sat", hour=1, minute=0, timezone=_KST)
+    """REQ-ATA-081: 주간 전체 재학습 — 주말(일요일) 1회, KST.
+
+    미장(美 정규장) 마감 이후 안전 여유를 두기 위해 일요일 01:00 KST로 고정한다
+    — 토요일 01:00 KST는 ET 기준 금요일 정규장 진행 중 시각이라 부적절하다.
+    """
+    return CronTrigger(day_of_week="sun", hour=1, minute=0, timezone=_KST)
 
 
 def monthly_optuna_tuning_trigger() -> CronTrigger:
-    """REQ-ATA-081: 월간 Optuna 튜닝 — 매월 1일 1회, KST."""
-    return CronTrigger(day="1", hour=2, minute=0, timezone=_KST)
+    """REQ-ATA-081: 월간 Optuna 튜닝 — 매월 1일 1회, KST.
+
+    `daily_staleness_check_trigger()`(REQ-ATA-083)와 동일한 마감 이후 안전
+    여유 관례를 따라 07:00 KST로 고정한다 — 매월 1일 02:00 KST는 ET 기준 전일
+    정오 무렵으로 미장 정규장 마감 훨씬 이전이라 부적절하다.
+    """
+    return CronTrigger(day="1", hour=7, minute=0, timezone=_KST)
 
 
 def daily_staleness_check_trigger() -> CronTrigger:

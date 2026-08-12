@@ -80,7 +80,7 @@ class TestCronTriggerFactories:
         trigger = weekly_full_retrain_trigger()
 
         fields = {f.name: str(f) for f in trigger.fields}
-        assert "sat" in fields["day_of_week"]
+        assert "sun" in fields["day_of_week"]
         assert str(trigger.timezone) == "Asia/Seoul"
 
     def test_monthly_optuna_tuning_is_once_per_month(self):
