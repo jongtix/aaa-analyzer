@@ -39,6 +39,10 @@ from typing import Protocol
 
 import paramiko
 
+_DEFAULT_CONNECT_TIMEOUT_SECONDS = 15.0
+"""paramiko 기본값(None=무기한 블로킹)은 REQ-ATA-021의 10초×6회 재시도 설계를
+무력화한다 — 첫 시도가 멈추면 재시도 루프에 도달하지 못한다."""
+
 
 class SshKeyPermissionError(RuntimeError):
     """SSH 프라이빗 키 파일의 mode가 600이 아니다(REQ-ATA-022)."""
@@ -99,12 +103,14 @@ class ParamikoSshConnection:
         username: str,
         private_key_path: Path,
         known_hosts_path: Path,
+        connect_timeout_seconds: float = _DEFAULT_CONNECT_TIMEOUT_SECONDS,
     ) -> None:
         validate_private_key_permissions(private_key_path)
         self._host = host
         self._port = port
         self._username = username
         self._private_key_path = private_key_path
+        self._connect_timeout_seconds = connect_timeout_seconds
         self._client = paramiko.SSHClient()
         self._client.load_host_keys(str(known_hosts_path))
         self._client.set_missing_host_key_policy(paramiko.RejectPolicy())
@@ -117,6 +123,7 @@ class ParamikoSshConnection:
             key_filename=str(self._private_key_path),
             look_for_keys=False,
             allow_agent=False,
+            timeout=self._connect_timeout_seconds,
         )
 
     def exec_command(self, command: str, timeout_seconds: float) -> CommandResult:
