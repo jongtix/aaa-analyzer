@@ -10,7 +10,10 @@ AAA(Algorithmic Alpha Advisor) Phase 2 ML 분석 서비스. 시장 데이터 기
 > 데이터셋을 조립하고 purged expanding-window walk-forward 검증을 수행, LightGBM+XGBoost ×
 > 시장 2종 × 예측기간 2종의 pooled 모델 16개(quantile 보조 모델 8개 포함) + Optuna 하이퍼파라미터
 > 튜닝을 학습해 앙상블 점수·신뢰도를 산출하고 SHA-256 무결성 검증과 2단계 보존 정책으로 모델을
-> 영속화하는 학습 코어) 범위로 한정된다. 추론 로직은 후속 SPEC(INFER-001 등)에서 구현된다.
+> 영속화하는 학습 코어) + SPEC-ANALYZER-TRAIN-AUTOMATION-001(WoL 매직패킷 기동 + SSH 원격
+> 디스패치 + MySQL 터널 + APScheduler cron 스케줄링(주간/월간 학습 + 일일 모델 정체 감지) +
+> Prometheus 계측 + 통합 실패 처리 경로로 TRAIN-001 학습 스크립트를 원격 자동화) 범위로 한정된다.
+> 추론 로직은 후속 SPEC(INFER-001 등)에서 구현된다.
 
 ## Stack
 
@@ -29,7 +32,7 @@ src/analyzer/
 ├── labels/         # 학습 레이블(타깃) 생성 — T+H as-of 가격 조정 기반 실현 수익률, 거래정지/가용범위 NaN 처리, purge gap
 ├── training/        # 모델 학습 코어 — 데이터셋 조립, walk-forward 검증, LightGBM+XGBoost 학습, Optuna 튜닝, 앙상블 스코어링, SHA-256 무결성 검증 모델 영속화(진입점: python -m analyzer.training.train)
 ├── inference/       # 완결형 자식 CLI 추론 진입점
-├── orchestration/   # 스트림 컨슈머·스케줄러 자리(모듈 경계만)
+├── orchestration/   # WoL 매직패킷 송신 + SSH 원격 디스패치(MySQL 터널) + SchedulerRegistry cron 확장 + 모델 정체(staleness) 감지 + Prometheus 계측 + 통합 실패 처리 경로(진입점: analyzer.orchestration.runner)
 └── api/             # FastAPI 부모 프로세스 (/health, /metrics)
 ```
 
