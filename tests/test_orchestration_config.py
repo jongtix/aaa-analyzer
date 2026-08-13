@@ -23,6 +23,7 @@ _REQUIRED_ENV = {
     "TRAIN_AUTOMATION_DB_TUNNEL_HOST": "nas-ugreen",
     "TRAIN_AUTOMATION_DB_TUNNEL_KEY_PATH": "/run/secrets/db_tunnel_key",
     "TRAIN_AUTOMATION_CACHE_DIR": "/cache",
+    "TRAIN_AUTOMATION_MOUNT_SCRIPT_PATH": "/Users/mac/aaa/scripts/mount-nas-hdd1.sh",
 }
 
 
@@ -57,6 +58,7 @@ class TestGetAutomationConfig:
             cache_dir=Path("/cache"),
             calendar_code="KRX",
             feature_code_version="v1",
+            mount_script_path=Path("/Users/mac/aaa/scripts/mount-nas-hdd1.sh"),
         )
 
     def test_raises_when_required_env_var_missing(self, monkeypatch: pytest.MonkeyPatch):
@@ -131,3 +133,19 @@ class TestGetAutomationConfig:
 
         assert config.calendar_code == "NASDAQ"
         assert config.feature_code_version == "v2"
+
+    def test_mount_script_path_reads_configured_value(self, monkeypatch: pytest.MonkeyPatch):
+        """SPEC-ANALYZER-TRAIN-AUTOMATION-001: ssh_key_path/known_hosts_path와
+        동일 계열(계정별 절대경로)의 필수 항목이므로 기본값 없이 설정값을 그대로
+        읽어야 한다."""
+        _set_required_env(monkeypatch)
+        monkeypatch.setenv(
+            "TRAIN_AUTOMATION_MOUNT_SCRIPT_PATH",
+            "/Users/other/Development/aaa/scripts/mount-nas-hdd1.sh",
+        )
+
+        config = get_automation_config()
+
+        assert config.mount_script_path == Path(
+            "/Users/other/Development/aaa/scripts/mount-nas-hdd1.sh"
+        )

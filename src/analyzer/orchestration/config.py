@@ -36,6 +36,7 @@ _REQUIRED_ENV_VARS = (
     "TRAIN_AUTOMATION_DB_TUNNEL_HOST",
     "TRAIN_AUTOMATION_DB_TUNNEL_KEY_PATH",
     "TRAIN_AUTOMATION_CACHE_DIR",
+    "TRAIN_AUTOMATION_MOUNT_SCRIPT_PATH",
 )
 
 
@@ -74,6 +75,13 @@ class AutomationConfig:
     cache_dir: Path
     calendar_code: str
     feature_code_version: str
+
+    mount_script_path: Path
+    """SPEC-ANALYZER-TRAIN-AUTOMATION-001: 맥북상 SMB 무인 마운트 스크립트
+    (`scripts/mount-nas-hdd1.sh`) 경로 — 원격 학습 CLI 실행 전 선행조건으로
+    호출된다. ssh_key_path/known_hosts_path와 동일 계열(계정별 절대경로)이므로
+    필수 항목이다 — 기본값을 두면 계정 불일치가 원격 SSH 실행 시점에야 불명확한
+    셸 에러로 드러난다."""
 
 
 def get_automation_config() -> AutomationConfig:
@@ -128,4 +136,5 @@ def get_automation_config() -> AutomationConfig:
         feature_code_version=os.environ.get(
             "TRAIN_AUTOMATION_FEATURE_CODE_VERSION", _DEFAULT_FEATURE_CODE_VERSION
         ),
+        mount_script_path=Path(os.environ["TRAIN_AUTOMATION_MOUNT_SCRIPT_PATH"]),
     )

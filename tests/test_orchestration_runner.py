@@ -82,6 +82,7 @@ def _make_config(tmp_path: Path) -> AutomationConfig:
         cache_dir=tmp_path / "cache",
         calendar_code="KRX",
         feature_code_version="v1",
+        mount_script_path=tmp_path / "mount-nas-hdd1.sh",
     )
 
 

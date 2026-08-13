@@ -171,12 +171,24 @@ def build_remote_dispatch_command(
     feature_code_version: str,
     db_tunnel_host: str,
     db_tunnel_key_path: Path,
+    mount_script_path: Path,
     db_tunnel_username: str = "db_tunnel",
     db_tunnel_local_port: int = 3306,
     db_tunnel_remote_port: int = 3306,
 ) -> str:
-    """REQ-ATA-030/031/032: MySQL 터널 수립 → TRAIN-001 CLI 원격 호출(스테이징
-    경로) → 터널 해제(trap)까지 단일 원격 셸 스크립트로 구성한다.
+    """REQ-ATA-030/031/032: 멱등 SMB 마운트 확인 → MySQL 터널 수립 →
+    TRAIN-001 CLI 원격 호출(스테이징 경로) → 터널 해제(trap)까지 단일 원격
+    셸 스크립트로 구성한다.
+
+    마운트 확인은 학습 CLI 실행의 선행조건이다(`&&`로 연결) — 스테이징
+    경로가 SMB 마운트포인트 하위이므로, 마운트 실패 상태에서 학습 CLI가
+    실행되면 로컬 디스크에 조용히 쓰거나 경로 없음으로 실패할 수 있다.
+    마운트 실패 시 학습 CLI를 건너뛰고 마운트 스크립트의 종료코드를 그대로
+    전달한다.
+
+    `mount_script_path`는 필수 인자다 — 기본값(맥북 계정별 절대경로)의 유일한
+    출처는 `config.py`의 `AutomationConfig`/`get_automation_config()`이며, 이
+    함수는 그 값을 그대로 소비할 뿐 자체 기본값을 갖지 않는다(경로 중복 방지).
 
     TRAIN-001의 확정된 CLI 계약(`training/train.py` `main()`)을 그대로 소비한다
     — 이 SPEC은 그 계약을 재정의하지 않는다(REQ-ATA-030).
@@ -189,6 +201,7 @@ def build_remote_dispatch_command(
     quoted_staging_models_root = shlex.quote(str(staging_models_root))
     quoted_data_as_of = shlex.quote(data_as_of.isoformat())
     quoted_feature_code_version = shlex.quote(feature_code_version)
+    quoted_mount_script_path = shlex.quote(str(mount_script_path))
 
     tunnel_command = (
         f"ssh -f -N -o BatchMode=yes -o ExitOnForwardFailure=yes "
@@ -196,6 +209,7 @@ def build_remote_dispatch_command(
         f"-L {db_tunnel_local_port}:127.0.0.1:{db_tunnel_remote_port} "
         f"{quoted_db_tunnel_username}@{quoted_db_tunnel_host}"
     )
+    mount_command = quoted_mount_script_path
     train_command = (
         f"python -m analyzer.training.train "
         f"--calendar-code {quoted_calendar_code} "
@@ -210,7 +224,7 @@ def build_remote_dispatch_command(
         f"{tunnel_command}; "
         f"TUNNEL_PID=$(pgrep -f '{tunnel_pattern}'); "
         f"trap 'kill $TUNNEL_PID 2>/dev/null' EXIT; "
-        f"{train_command}; "
+        f"{mount_command} && {train_command}; "
         f"exit $?"
     )
 

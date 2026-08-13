@@ -222,6 +222,7 @@ class TestBuildRemoteDispatchCommand:
             feature_code_version="v1",
             db_tunnel_host="nas-ugreen",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
             db_tunnel_username="db_tunnel",
             db_tunnel_local_port=3306,
             db_tunnel_remote_port=3306,
@@ -241,6 +242,7 @@ class TestBuildRemoteDispatchCommand:
             feature_code_version="v1",
             db_tunnel_host="nas-ugreen",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
         )
 
         assert "StrictHostKeyChecking=no" not in command
@@ -255,6 +257,7 @@ class TestBuildRemoteDispatchCommand:
             feature_code_version="v1",
             db_tunnel_host="nas-ugreen",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
         )
 
         assert "python -m analyzer.training.train" in command
@@ -275,6 +278,7 @@ class TestBuildRemoteDispatchCommand:
             feature_code_version="v1",
             db_tunnel_host="nas-ugreen",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
         )
 
         assert "trap" in command
@@ -291,6 +295,7 @@ class TestBuildRemoteDispatchCommand:
             feature_code_version="v1",
             db_tunnel_host="nas-ugreen",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
         )
 
         assert command.rstrip().endswith("exit $?") or "exit $TRAIN_EXIT_CODE" in command
@@ -308,6 +313,7 @@ class TestBuildRemoteDispatchCommand:
             feature_code_version="v1",
             db_tunnel_host="nas-ugreen",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
         )
 
         # 이스케이프되지 않은 형태(따옴표 없이 노출)로는 존재하지 않아야 한다 —
@@ -326,11 +332,43 @@ class TestBuildRemoteDispatchCommand:
             feature_code_version="v1",
             db_tunnel_host="nas-ugreen",
             db_tunnel_key_path=Path("/run/secrets/db tunnel key"),
+            mount_script_path=Path("/mount.sh"),
         )
 
         assert shlex.quote("/staging/run 1") in command
         assert shlex.quote("/cache dir") in command
         assert shlex.quote("/run/secrets/db tunnel key") in command
+
+    def test_mount_script_gates_training_cli_via_and(self):
+        """마운트 실패 시 학습 CLI가 실행되지 않아야 한다 — 스테이징 경로가
+        SMB 마운트포인트 하위이므로 마운트 미완료 상태에서 쓰기가 진행되면
+        안 된다."""
+        command = build_remote_dispatch_command(
+            staging_models_root=Path("/staging/run-1"),
+            calendar_code="KRX",
+            cache_dir=Path("/cache"),
+            data_as_of=date(2026, 8, 11),
+            feature_code_version="v1",
+            db_tunnel_host="nas-ugreen",
+            db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/custom/mount.sh"),
+        )
+
+        assert "/custom/mount.sh && python -m analyzer.training.train" in command
+
+    def test_mount_script_path_is_shlex_quoted(self):
+        command = build_remote_dispatch_command(
+            staging_models_root=Path("/staging/run-1"),
+            calendar_code="KRX",
+            cache_dir=Path("/cache"),
+            data_as_of=date(2026, 8, 11),
+            feature_code_version="v1",
+            db_tunnel_host="nas-ugreen",
+            db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/custom/mount script.sh"),
+        )
+
+        assert shlex.quote("/custom/mount script.sh") in command
 
 
 class TestPromoteStagingToActive:

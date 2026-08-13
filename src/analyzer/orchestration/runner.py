@@ -111,6 +111,7 @@ def execute_scheduled_training_run(
         db_tunnel_username=config.db_tunnel_username,
         db_tunnel_local_port=config.db_tunnel_local_port,
         db_tunnel_remote_port=config.db_tunnel_remote_port,
+        mount_script_path=config.mount_script_path,
     )
 
     try:
