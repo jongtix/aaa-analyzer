@@ -69,7 +69,7 @@ def _make_config(tmp_path: Path) -> AutomationConfig:
         ssh_username="dispatch",
         ssh_private_key_path=tmp_path / "dispatch_key",
         known_hosts_path=tmp_path / "known_hosts",
-        db_tunnel_host="nas-ugreen",
+        db_tunnel_host="nas-host",
         db_tunnel_username="db_tunnel",
         db_tunnel_private_key_path=tmp_path / "db_tunnel_key",
         db_tunnel_local_port=3306,

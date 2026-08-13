@@ -220,7 +220,7 @@ class TestBuildRemoteDispatchCommand:
             cache_dir=Path("/cache"),
             data_as_of=date(2026, 8, 11),
             feature_code_version="v1",
-            db_tunnel_host="nas-ugreen",
+            db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
             db_tunnel_username="db_tunnel",
@@ -228,7 +228,7 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_remote_port=3306,
         )
 
-        assert "db_tunnel@nas-ugreen" in command
+        assert "db_tunnel@nas-host" in command
         assert "-L 3306:127.0.0.1:3306" in command
         assert "/run/secrets/db_tunnel_key" in command
 
@@ -240,7 +240,7 @@ class TestBuildRemoteDispatchCommand:
             cache_dir=Path("/cache"),
             data_as_of=date(2026, 8, 11),
             feature_code_version="v1",
-            db_tunnel_host="nas-ugreen",
+            db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
         )
@@ -255,7 +255,7 @@ class TestBuildRemoteDispatchCommand:
             cache_dir=Path("/cache"),
             data_as_of=date(2026, 8, 11),
             feature_code_version="v1",
-            db_tunnel_host="nas-ugreen",
+            db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
         )
@@ -276,7 +276,7 @@ class TestBuildRemoteDispatchCommand:
             cache_dir=Path("/cache"),
             data_as_of=date(2026, 8, 11),
             feature_code_version="v1",
-            db_tunnel_host="nas-ugreen",
+            db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
         )
@@ -293,7 +293,7 @@ class TestBuildRemoteDispatchCommand:
             cache_dir=Path("/cache"),
             data_as_of=date(2026, 8, 11),
             feature_code_version="v1",
-            db_tunnel_host="nas-ugreen",
+            db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
         )
@@ -311,7 +311,7 @@ class TestBuildRemoteDispatchCommand:
             cache_dir=Path("/cache"),
             data_as_of=date(2026, 8, 11),
             feature_code_version="v1",
-            db_tunnel_host="nas-ugreen",
+            db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
         )
@@ -330,7 +330,7 @@ class TestBuildRemoteDispatchCommand:
             cache_dir=Path("/cache dir"),
             data_as_of=date(2026, 8, 11),
             feature_code_version="v1",
-            db_tunnel_host="nas-ugreen",
+            db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db tunnel key"),
             mount_script_path=Path("/mount.sh"),
         )
@@ -349,7 +349,7 @@ class TestBuildRemoteDispatchCommand:
             cache_dir=Path("/cache"),
             data_as_of=date(2026, 8, 11),
             feature_code_version="v1",
-            db_tunnel_host="nas-ugreen",
+            db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/custom/mount.sh"),
         )
@@ -363,7 +363,7 @@ class TestBuildRemoteDispatchCommand:
             cache_dir=Path("/cache"),
             data_as_of=date(2026, 8, 11),
             feature_code_version="v1",
-            db_tunnel_host="nas-ugreen",
+            db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/custom/mount script.sh"),
         )
