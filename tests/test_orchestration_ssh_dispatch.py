@@ -223,6 +223,7 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
             db_tunnel_username="db_tunnel",
             db_tunnel_local_port=3306,
             db_tunnel_remote_port=3306,
@@ -246,6 +247,7 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
             db_tunnel_port=55522,
             db_tunnel_local_port=3306,
             db_tunnel_remote_port=3306,
@@ -265,6 +267,7 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
         )
 
         assert "StrictHostKeyChecking=no" not in command
@@ -280,6 +283,7 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
         )
 
         assert "python -m analyzer.training.train" in command
@@ -288,6 +292,39 @@ class TestBuildRemoteDispatchCommand:
         assert "--cache-dir /cache" in command
         assert "--data-as-of 2026-08-11" in command
         assert "--feature-code-version v1" in command
+
+    def test_uses_configured_python_executable_path_not_bare_python(self):
+        """수동 실행 실측(2026-08-13) — 원격 비대화형 셸 PATH엔 `python`이 없고
+        (`python3`만 존재), `python3`도 analyzer 패키지가 없는 시스템 파이썬을
+        가리켜 종료코드 127로 실패한다. venv python 절대경로를 그대로 써야 한다."""
+        command = build_remote_dispatch_command(
+            staging_models_root=Path("/staging/run-1"),
+            calendar_code="KRX",
+            cache_dir=Path("/cache"),
+            data_as_of=date(2026, 8, 11),
+            feature_code_version="v1",
+            db_tunnel_host="nas-host",
+            db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/Users/mac/aaa/aaa-analyzer/.venv/bin/python"),
+        )
+
+        assert "/Users/mac/aaa/aaa-analyzer/.venv/bin/python -m analyzer.training.train" in command
+
+    def test_python_executable_path_is_shlex_quoted(self):
+        command = build_remote_dispatch_command(
+            staging_models_root=Path("/staging/run-1"),
+            calendar_code="KRX",
+            cache_dir=Path("/cache"),
+            data_as_of=date(2026, 8, 11),
+            feature_code_version="v1",
+            db_tunnel_host="nas-host",
+            db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/custom/venv bin/python"),
+        )
+
+        assert "'/custom/venv bin/python' -m analyzer.training.train" in command
 
     def test_tears_down_tunnel_on_exit_regardless_of_training_outcome(self):
         """REQ-ATA-032: 학습 실행 종료 시(성공·실패 무관) 터널을 해제한다 —
@@ -301,6 +338,7 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
         )
 
         assert "trap" in command
@@ -318,6 +356,7 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
         )
 
         assert command.rstrip().endswith("exit $?") or "exit $TRAIN_EXIT_CODE" in command
@@ -336,6 +375,7 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
         )
 
         # 이스케이프되지 않은 형태(따옴표 없이 노출)로는 존재하지 않아야 한다 —
@@ -355,6 +395,7 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db tunnel key"),
             mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
         )
 
         assert shlex.quote("/staging/run 1") in command
@@ -374,9 +415,10 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/custom/mount.sh"),
+            python_executable_path=Path("/python"),
         )
 
-        assert "/custom/mount.sh && python -m analyzer.training.train" in command
+        assert "/custom/mount.sh && /python -m analyzer.training.train" in command
 
     def test_mount_script_path_is_shlex_quoted(self):
         command = build_remote_dispatch_command(
@@ -388,6 +430,7 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_host="nas-host",
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/custom/mount script.sh"),
+            python_executable_path=Path("/python"),
         )
 
         assert shlex.quote("/custom/mount script.sh") in command

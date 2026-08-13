@@ -172,6 +172,7 @@ def build_remote_dispatch_command(
     db_tunnel_host: str,
     db_tunnel_key_path: Path,
     mount_script_path: Path,
+    python_executable_path: Path,
     db_tunnel_username: str = "db_tunnel",
     db_tunnel_port: int = 22,
     db_tunnel_local_port: int = 3306,
@@ -199,6 +200,12 @@ def build_remote_dispatch_command(
 
     TRAIN-001의 확정된 CLI 계약(`training/train.py` `main()`)을 그대로 소비한다
     — 이 SPEC은 그 계약을 재정의하지 않는다(REQ-ATA-030).
+
+    `python_executable_path`는 맥북상 학습 venv의 python 절대경로다 — 원격
+    SSH 실행은 비대화형 셸이라 PATH에 pyenv/venv가 안 잡힌다. `python`
+    하드코딩은 맥에 시스템 `python`이 없어(`python3`만 존재) 종료코드 127로,
+    `python3`로 바꿔도 `analyzer` 패키지가 없는 시스템 파이썬이라 동일하게
+    실패한다(수동 실행 실측, 2026-08-13).
     """
     quoted_db_tunnel_key_path = shlex.quote(str(db_tunnel_key_path))
     quoted_db_tunnel_username = shlex.quote(db_tunnel_username)
@@ -209,6 +216,7 @@ def build_remote_dispatch_command(
     quoted_data_as_of = shlex.quote(data_as_of.isoformat())
     quoted_feature_code_version = shlex.quote(feature_code_version)
     quoted_mount_script_path = shlex.quote(str(mount_script_path))
+    quoted_python_executable_path = shlex.quote(str(python_executable_path))
 
     tunnel_command = (
         f"ssh -f -N -o BatchMode=yes -o ExitOnForwardFailure=yes "
@@ -219,7 +227,7 @@ def build_remote_dispatch_command(
     )
     mount_command = quoted_mount_script_path
     train_command = (
-        f"python -m analyzer.training.train "
+        f"{quoted_python_executable_path} -m analyzer.training.train "
         f"--calendar-code {quoted_calendar_code} "
         f"--cache-dir {quoted_cache_dir} "
         f"--models-root {quoted_staging_models_root} "

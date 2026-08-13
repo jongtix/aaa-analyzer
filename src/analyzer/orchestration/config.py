@@ -38,6 +38,7 @@ _REQUIRED_ENV_VARS = (
     "TRAIN_AUTOMATION_DB_TUNNEL_KEY_PATH",
     "TRAIN_AUTOMATION_CACHE_DIR",
     "TRAIN_AUTOMATION_MOUNT_SCRIPT_PATH",
+    "TRAIN_AUTOMATION_PYTHON_PATH",
 )
 
 
@@ -88,6 +89,15 @@ class AutomationConfig:
     호출된다. ssh_key_path/known_hosts_path와 동일 계열(계정별 절대경로)이므로
     필수 항목이다 — 기본값을 두면 계정 불일치가 원격 SSH 실행 시점에야 불명확한
     셸 에러로 드러난다."""
+
+    python_executable_path: Path
+    """맥북상 TRAIN-001 학습 venv의 python 절대경로(예:
+    `.venv/bin/python`) — 원격 SSH 실행은 비대화형 셸이라 `.zshrc` 등을
+    읽지 않으므로 PATH에 pyenv/uv venv가 잡히지 않는다. `python` 하드코딩은
+    이 맥에 시스템 `python`이 없어(`python3`만 존재) 종료코드 127로 실패하고,
+    `python3`로 바꿔도 `analyzer` 패키지가 없는 시스템 파이썬을 가리켜
+    동일하게 실패한다(Stage 실전 수동 실행 중 발견, 2026-08-13). mount_script_path와
+    동일 계열(계정별 절대경로)이므로 기본값을 두지 않는다."""
 
 
 def get_automation_config() -> AutomationConfig:
@@ -146,4 +156,5 @@ def get_automation_config() -> AutomationConfig:
             "TRAIN_AUTOMATION_FEATURE_CODE_VERSION", _DEFAULT_FEATURE_CODE_VERSION
         ),
         mount_script_path=Path(os.environ["TRAIN_AUTOMATION_MOUNT_SCRIPT_PATH"]),
+        python_executable_path=Path(os.environ["TRAIN_AUTOMATION_PYTHON_PATH"]),
     )

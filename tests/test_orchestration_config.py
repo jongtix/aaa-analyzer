@@ -24,6 +24,7 @@ _REQUIRED_ENV = {
     "TRAIN_AUTOMATION_DB_TUNNEL_KEY_PATH": "/run/secrets/db_tunnel_key",
     "TRAIN_AUTOMATION_CACHE_DIR": "/cache",
     "TRAIN_AUTOMATION_MOUNT_SCRIPT_PATH": "/Users/mac/aaa/scripts/mount-nas-hdd1.sh",
+    "TRAIN_AUTOMATION_PYTHON_PATH": "/Users/mac/aaa/aaa-analyzer/.venv/bin/python",
 }
 
 
@@ -60,6 +61,7 @@ class TestGetAutomationConfig:
             calendar_code="KRX",
             feature_code_version="v1",
             mount_script_path=Path("/Users/mac/aaa/scripts/mount-nas-hdd1.sh"),
+            python_executable_path=Path("/Users/mac/aaa/aaa-analyzer/.venv/bin/python"),
         )
 
     def test_raises_when_required_env_var_missing(self, monkeypatch: pytest.MonkeyPatch):
@@ -166,4 +168,21 @@ class TestGetAutomationConfig:
 
         assert config.mount_script_path == Path(
             "/Users/other/Development/aaa/scripts/mount-nas-hdd1.sh"
+        )
+
+    def test_python_executable_path_reads_configured_value(self, monkeypatch: pytest.MonkeyPatch):
+        """SPEC-ANALYZER-TRAIN-AUTOMATION-001: mount_script_path와 동일 계열
+        (계정별 절대경로)의 필수 항목이므로 기본값 없이 설정값을 그대로
+        읽어야 한다(수동 실행 실측, 2026-08-13 — 원격 비대화형 셸 PATH에
+        `python`이 없어 종료코드 127 발생 후 도입)."""
+        _set_required_env(monkeypatch)
+        monkeypatch.setenv(
+            "TRAIN_AUTOMATION_PYTHON_PATH",
+            "/Users/other/Development/aaa/aaa-analyzer/.venv/bin/python",
+        )
+
+        config = get_automation_config()
+
+        assert config.python_executable_path == Path(
+            "/Users/other/Development/aaa/aaa-analyzer/.venv/bin/python"
         )

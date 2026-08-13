@@ -84,6 +84,7 @@ def _make_config(tmp_path: Path) -> AutomationConfig:
         calendar_code="KRX",
         feature_code_version="v1",
         mount_script_path=tmp_path / "mount-nas-hdd1.sh",
+        python_executable_path=tmp_path / ".venv" / "bin" / "python",
     )
 
 
