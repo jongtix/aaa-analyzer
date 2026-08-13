@@ -6,7 +6,7 @@ REQ-AD-010(SQLAlchemy 엔진 구성)/REQ-AD-011(SELECT 전용 접근)/REQ-AD-012
 별개다.
 """
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -62,6 +62,36 @@ class TestFetchMarketCalendar:
         assert calendar.trading_days == frozenset({date(2023, 12, 27), date(2023, 12, 28)})
         _, kwargs = mock_read_sql.call_args
         assert kwargs["params"] == {"calendar_code": "KRX"}
+
+    def test_returns_trading_calendar_when_is_open_is_int64(self):
+        """MySQL `TINYINT(1)` 컬럼은 pymysql/pandas 조합에서 Python `bool`이 아니라
+        `int64`(0/1)로 반환된다(2026-08-13 NAS 실 DB 실측 — `market_calendar` 15,217행
+        중 `is_open`이 전부 int64). `df.loc[df["is_open"], ...]`은 `is_open`이 진짜
+        `bool` dtype일 때만 불리언 마스크로 동작하고, int64일 때는 pandas가 이를
+        **레이블 기반 인덱싱**으로 해석해 값 0/1을 인덱스 레이블로 취급한다 — 그
+        결과 실제 개장일 패턴과 무관하게 항상 인덱스 라벨 0/1에 해당하는 행만
+        반환된다. 실제로 이 결함 때문에 `fetch_market_calendar()`가 KRX/NYSE 모두
+        캘린더 전체가 아니라 처음 두 행(1985-01-04/05)만 반환하고 있었다 — 실 데이터로
+        학습 파이프라인을 처음 끝까지 돌렸을 때(SPEC-ANALYZER-TRAIN-AUTOMATION-001)
+        `calendar.prev_trading_day()`가 하한 없이 과거로 걸어가다 `OverflowError:
+        date value out of range`로 크래시해 발견됨. 기존 테스트(`is_open: [True, True,
+        False]`)는 Python bool 리터럴을 직접 넣어 이 dtype 불일치를 가리고 있었다."""
+        engine = MagicMock()
+        base = date(2023, 1, 1)
+        n = 10
+        mock_df = pd.DataFrame(
+            {
+                "calendar_code": ["KRX"] * n,
+                "cal_date": [base + timedelta(days=i) for i in range(n)],
+                "is_open": pd.array([1, 0, 1, 0, 1, 0, 1, 0, 1, 0], dtype="int64"),
+            }
+        )
+
+        with patch("analyzer.data.repository.pd.read_sql", return_value=mock_df):
+            calendar = fetch_market_calendar(engine, "KRX")
+
+        expected = frozenset(base + timedelta(days=i) for i in range(n) if i % 2 == 0)
+        assert calendar.trading_days == expected
 
     def test_query_selects_only_market_calendar_columns(self):
         engine = MagicMock()

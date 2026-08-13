@@ -86,9 +86,19 @@ def build_engine(config: DbConfig) -> Engine:
 
 
 def fetch_market_calendar(engine: Engine, calendar_code: str) -> TradingCalendar:
-    """`market_calendar`에서 `calendar_code`의 거래일 집합을 읽는다(REQ-AD-012)."""
+    """`market_calendar`에서 `calendar_code`의 거래일 집합을 읽는다(REQ-AD-012).
+
+    MySQL `TINYINT(1)` 컬럼(`is_open`)은 pymysql/pandas 조합에서 `bool`이 아니라
+    `int64`(0/1)로 반환된다 — `df.loc[df["is_open"], ...]`을 `int64` Series에
+    그대로 쓰면 pandas가 불리언 마스크가 아니라 **레이블 기반 인덱싱**으로
+    해석해(값 0/1을 인덱스 레이블로 취급) 실제 개장일 패턴과 무관하게 항상
+    인덱스 레이블 0/1에 해당하는 행만 반환한다(2026-08-13 NAS 실 DB 실측 —
+    `fetch_market_calendar()`가 KRX/NYSE 모두 캘린더 전체가 아니라 처음 두
+    행(1985-01-04/05)만 반환하는 것으로 발견). `.astype(bool)`로 명시 변환해야
+    한다.
+    """
     df = pd.read_sql(_MARKET_CALENDAR_QUERY, engine, params={"calendar_code": calendar_code})
-    trading_days = frozenset(df.loc[df["is_open"], "cal_date"])
+    trading_days = frozenset(df.loc[df["is_open"].astype(bool), "cal_date"])
     return TradingCalendar(calendar_code=calendar_code, trading_days=trading_days)
 
 
