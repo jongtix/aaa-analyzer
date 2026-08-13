@@ -37,7 +37,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Engine
 
 from analyzer.data.models import TradingCalendar
@@ -53,18 +53,25 @@ from analyzer.training import persistence as persistence_module
 from analyzer.training.db import build_trainer_engine
 from analyzer.training.models import HORIZONS, MARKETS, train_pooled_models
 
-_MARKET_TO_STOCKS_MARKET_CODE: dict[str, str] = {"domestic": "KRX", "overseas": "US"}
+_MARKET_TO_STOCKS_MARKET_CODES: dict[str, tuple[str, ...]] = {
+    "domestic": ("KOSPI", "KOSDAQ"),
+    "overseas": ("NYSE", "NASDAQ", "AMEX"),
+}
 """`training/` 소관 시장 토큰("domestic"/"overseas")과 `stocks.market`
-컬럼 값("KRX"/"US", TECHSPEC §648) 사이의 매핑 — 이 SPEC 신규 결정이
-아니라 기존 `stocks`/`labels.config.DEFAULT_START_DATES` 관례를 그대로
-잇는 변환이다."""
+컬럼 값 사이의 매핑. `stocks.market`은 거래소 코드로 저장되며
+(aaa-collector `Market` enum), `KRX`/`US`는 그 enum에 존재하긴 하지만
+지수 종목(`asset_type=INDEX`, 코스피지수/S&P500 등) 전용 값이라 개별
+종목(`asset_type=STOCK`) 유니버스에는 절대 나타나지 않는다(2026-08-13
+NAS DB 실측: market='KRX'/'US' AND asset_type='STOCK' → 0행 — 이전
+회귀 버그, TECHSPEC §648 언급은 컬럼 존재 자체이지 이 값 매핑의 근거가
+아니었다)."""
 
 _STOCK_UNIVERSE_QUERY = text(
     "SELECT s.symbol AS stock_code, g.grade, s.delisted_at "
     "FROM stocks s "
     "JOIN stock_grades g ON g.stock_id = s.id "
-    "WHERE s.market = :market_code AND s.asset_type = 'STOCK'"
-)
+    "WHERE s.market IN :market_codes AND s.asset_type = 'STOCK'"
+).bindparams(bindparam("market_codes", expanding=True))
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,10 +87,11 @@ def fetch_stock_universe(engine: Engine, market: str) -> pd.DataFrame:
     """`stock_grades`/`stocks`에서 후보 유니버스(등급+상장폐지 여부)를 조회한다.
 
     `market`은 "domestic"/"overseas"(이 SPEC의 시장 토큰) — 내부적으로
-    `stocks.market`의 "KRX"/"US" 값으로 변환해 조회한다.
+    `stocks.market`의 거래소 코드 집합(domestic=KOSPI/KOSDAQ,
+    overseas=NYSE/NASDAQ/AMEX)으로 변환해 조회한다.
     """
-    market_code = _MARKET_TO_STOCKS_MARKET_CODE[market]
-    return pd.read_sql(_STOCK_UNIVERSE_QUERY, engine, params={"market_code": market_code})
+    market_codes = _MARKET_TO_STOCKS_MARKET_CODES[market]
+    return pd.read_sql(_STOCK_UNIVERSE_QUERY, engine, params={"market_codes": market_codes})
 
 
 def fetch_market_data(

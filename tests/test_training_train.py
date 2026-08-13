@@ -135,21 +135,27 @@ class TestRunTrainingPipelineOrchestration:
 
 
 class TestFetchStockUniverseMarketCodeMapping:
-    def test_domestic_maps_to_krx(self):
+    """`stocks.market`은 거래소 코드(KOSPI/KOSDAQ/NYSE/NASDAQ/AMEX)로 저장된다
+    (aaa-collector `Market` enum 실측) — `KRX`/`US`는 지수 종목(`asset_type=INDEX`)
+    전용 값이라 개별 종목(`asset_type=STOCK`) 유니버스 조회에는 쓰이지 않는다.
+    2026-08-13 NAS DB 실측: market='KRX' AND asset_type='STOCK' → 0행,
+    market='US' AND asset_type='STOCK' → 0행(이전 회귀 버그)."""
+
+    def test_domestic_maps_to_kospi_and_kosdaq(self):
         engine = MagicMock()
         with patch.object(train_module.pd, "read_sql", return_value=pd.DataFrame()) as mock_read:
             train_module.fetch_stock_universe(engine, "domestic")
 
         params = mock_read.call_args[1]["params"]
-        assert params["market_code"] == "KRX"
+        assert params["market_codes"] == ("KOSPI", "KOSDAQ")
 
-    def test_overseas_maps_to_us(self):
+    def test_overseas_maps_to_nyse_nasdaq_amex(self):
         engine = MagicMock()
         with patch.object(train_module.pd, "read_sql", return_value=pd.DataFrame()) as mock_read:
             train_module.fetch_stock_universe(engine, "overseas")
 
         params = mock_read.call_args[1]["params"]
-        assert params["market_code"] == "US"
+        assert params["market_codes"] == ("NYSE", "NASDAQ", "AMEX")
 
 
 class TestMainCliExitCode:
