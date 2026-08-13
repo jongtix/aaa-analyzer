@@ -173,6 +173,8 @@ def build_remote_dispatch_command(
     db_tunnel_key_path: Path,
     mount_script_path: Path,
     python_executable_path: Path,
+    mysql_database: str,
+    mysql_trainer_password: str,
     db_tunnel_username: str = "db_tunnel",
     db_tunnel_port: int = 22,
     db_tunnel_local_port: int = 3306,
@@ -206,6 +208,14 @@ def build_remote_dispatch_command(
     하드코딩은 맥에 시스템 `python`이 없어(`python3`만 존재) 종료코드 127로,
     `python3`로 바꿔도 `analyzer` 패키지가 없는 시스템 파이썬이라 동일하게
     실패한다(수동 실행 실측, 2026-08-13).
+
+    `mysql_database`/`mysql_trainer_password`는 `training/db.py`
+    `get_trainer_db_config()`가 요구하는 필수 환경변수다 — analyzer 컨테이너
+    자신의 동일 이름 env var를 재사용할 뿐 신규 시크릿이 아니다.
+    `MYSQL_HOST`/`MYSQL_PORT`는 컨테이너 자신의 값(도커 네트워크 호스트명)이
+    아니라 db_tunnel이 연 로컬 포워딩(`127.0.0.1:{db_tunnel_local_port}`)으로
+    고정한다 — 이 값들이 없으면 원격 학습 CLI가 MissingConfigError로 즉시
+    실패한다(수동 실행 실측, 2026-08-13).
     """
     quoted_db_tunnel_key_path = shlex.quote(str(db_tunnel_key_path))
     quoted_db_tunnel_username = shlex.quote(db_tunnel_username)
@@ -217,6 +227,8 @@ def build_remote_dispatch_command(
     quoted_feature_code_version = shlex.quote(feature_code_version)
     quoted_mount_script_path = shlex.quote(str(mount_script_path))
     quoted_python_executable_path = shlex.quote(str(python_executable_path))
+    quoted_mysql_database = shlex.quote(mysql_database)
+    quoted_mysql_trainer_password = shlex.quote(mysql_trainer_password)
 
     tunnel_command = (
         f"ssh -f -N -o BatchMode=yes -o ExitOnForwardFailure=yes "
@@ -227,6 +239,9 @@ def build_remote_dispatch_command(
     )
     mount_command = quoted_mount_script_path
     train_command = (
+        f"MYSQL_HOST=127.0.0.1 MYSQL_PORT={db_tunnel_local_port} "
+        f"MYSQL_DATABASE={quoted_mysql_database} "
+        f"MYSQL_TRAINER_PASSWORD={quoted_mysql_trainer_password} "
         f"{quoted_python_executable_path} -m analyzer.training.train "
         f"--calendar-code {quoted_calendar_code} "
         f"--cache-dir {quoted_cache_dir} "

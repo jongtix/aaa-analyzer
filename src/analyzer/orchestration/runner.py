@@ -114,6 +114,8 @@ def execute_scheduled_training_run(
         db_tunnel_remote_port=config.db_tunnel_remote_port,
         mount_script_path=config.mount_script_path,
         python_executable_path=config.python_executable_path,
+        mysql_database=config.mysql_database,
+        mysql_trainer_password=config.mysql_trainer_password,
     )
 
     try:

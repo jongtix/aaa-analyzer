@@ -39,6 +39,8 @@ _REQUIRED_ENV_VARS = (
     "TRAIN_AUTOMATION_CACHE_DIR",
     "TRAIN_AUTOMATION_MOUNT_SCRIPT_PATH",
     "TRAIN_AUTOMATION_PYTHON_PATH",
+    "MYSQL_DATABASE",
+    "MYSQL_TRAINER_PASSWORD",
 )
 
 
@@ -99,6 +101,17 @@ class AutomationConfig:
     동일하게 실패한다(Stage 실전 수동 실행 중 발견, 2026-08-13). mount_script_path와
     동일 계열(계정별 절대경로)이므로 기본값을 두지 않는다."""
 
+    mysql_database: str
+    """맥 원격 학습 CLI(`training/db.py` `get_trainer_db_config()`)에 전달할
+    DB 스키마명 — analyzer 컨테이너 자신의 `MYSQL_DATABASE`와 동일 값을
+    재사용한다(신규 시크릿 아님). 원격 SSH 실행은 비대화형 셸이라 이 값이
+    전달되지 않으면 MissingConfigError로 학습이 즉시 실패한다(수동 실행
+    실측, 2026-08-13)."""
+    mysql_trainer_password: str
+    """맥 원격 학습 CLI에 전달할 trainer 계정 비밀번호 — analyzer 컨테이너
+    자신의 `MYSQL_TRAINER_PASSWORD`와 동일 값을 재사용한다(신규 시크릿
+    아님, TRAIN-001 REQ-AT-010/011 계약)."""
+
 
 def get_automation_config() -> AutomationConfig:
     """`TRAIN_AUTOMATION_*` 환경변수를 읽어 `AutomationConfig`를 구성한다.
@@ -157,4 +170,6 @@ def get_automation_config() -> AutomationConfig:
         ),
         mount_script_path=Path(os.environ["TRAIN_AUTOMATION_MOUNT_SCRIPT_PATH"]),
         python_executable_path=Path(os.environ["TRAIN_AUTOMATION_PYTHON_PATH"]),
+        mysql_database=os.environ["MYSQL_DATABASE"],
+        mysql_trainer_password=os.environ["MYSQL_TRAINER_PASSWORD"],
     )

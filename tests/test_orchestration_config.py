@@ -25,6 +25,8 @@ _REQUIRED_ENV = {
     "TRAIN_AUTOMATION_CACHE_DIR": "/cache",
     "TRAIN_AUTOMATION_MOUNT_SCRIPT_PATH": "/Users/mac/aaa/scripts/mount-nas-hdd1.sh",
     "TRAIN_AUTOMATION_PYTHON_PATH": "/Users/mac/aaa/aaa-analyzer/.venv/bin/python",
+    "MYSQL_DATABASE": "aaa",
+    "MYSQL_TRAINER_PASSWORD": "trainer-secret",
 }
 
 
@@ -62,6 +64,8 @@ class TestGetAutomationConfig:
             feature_code_version="v1",
             mount_script_path=Path("/Users/mac/aaa/scripts/mount-nas-hdd1.sh"),
             python_executable_path=Path("/Users/mac/aaa/aaa-analyzer/.venv/bin/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
         )
 
     def test_raises_when_required_env_var_missing(self, monkeypatch: pytest.MonkeyPatch):
@@ -186,3 +190,20 @@ class TestGetAutomationConfig:
         assert config.python_executable_path == Path(
             "/Users/other/Development/aaa/aaa-analyzer/.venv/bin/python"
         )
+
+    def test_mysql_database_and_trainer_password_reuse_container_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """수동 실행 실측(2026-08-13) — 원격 학습 CLI(training/db.py
+        get_trainer_db_config())가 요구하는 MYSQL_DATABASE/
+        MYSQL_TRAINER_PASSWORD가 원격 비대화형 셸에 전혀 전달되지 않아
+        MissingConfigError로 실패했다. 신규 시크릿이 아니라 컨테이너
+        자신의 동일 이름 env var를 그대로 재사용한다."""
+        _set_required_env(monkeypatch)
+        monkeypatch.setenv("MYSQL_DATABASE", "aaa")
+        monkeypatch.setenv("MYSQL_TRAINER_PASSWORD", "reused-secret")
+
+        config = get_automation_config()
+
+        assert config.mysql_database == "aaa"
+        assert config.mysql_trainer_password == "reused-secret"

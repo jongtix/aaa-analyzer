@@ -46,6 +46,8 @@ def _make_config(tmp_path: Path) -> AutomationConfig:
         feature_code_version="v1",
         mount_script_path=tmp_path / "mount-nas-hdd1.sh",
         python_executable_path=tmp_path / ".venv" / "bin" / "python",
+        mysql_database="aaa",
+        mysql_trainer_password="trainer-secret",
     )
 
 

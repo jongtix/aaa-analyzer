@@ -224,6 +224,8 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
             python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
             db_tunnel_username="db_tunnel",
             db_tunnel_local_port=3306,
             db_tunnel_remote_port=3306,
@@ -248,6 +250,8 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
             python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
             db_tunnel_port=55522,
             db_tunnel_local_port=3306,
             db_tunnel_remote_port=3306,
@@ -268,6 +272,8 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
             python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
         )
 
         assert "StrictHostKeyChecking=no" not in command
@@ -284,6 +290,8 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
             python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
         )
 
         assert "python -m analyzer.training.train" in command
@@ -307,9 +315,53 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
             python_executable_path=Path("/Users/mac/aaa/aaa-analyzer/.venv/bin/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
         )
 
         assert "/Users/mac/aaa/aaa-analyzer/.venv/bin/python -m analyzer.training.train" in command
+
+    def test_injects_mysql_env_vars_required_by_train_db_config(self):
+        """수동 실행 실측(2026-08-13) — training/db.py get_trainer_db_config()가
+        요구하는 MYSQL_HOST/PORT/DATABASE/TRAINER_PASSWORD가 원격 비대화형
+        셸에 없어 MissingConfigError로 즉시 실패했다. MYSQL_HOST/PORT는
+        컨테이너 자신의 값이 아니라 db_tunnel 로컬 포워딩으로 고정한다."""
+        command = build_remote_dispatch_command(
+            staging_models_root=Path("/staging/run-1"),
+            calendar_code="KRX",
+            cache_dir=Path("/cache"),
+            data_as_of=date(2026, 8, 11),
+            feature_code_version="v1",
+            db_tunnel_host="nas-host",
+            db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
+            db_tunnel_local_port=13306,
+        )
+
+        assert "MYSQL_HOST=127.0.0.1 MYSQL_PORT=13306" in command
+        assert "MYSQL_DATABASE=aaa" in command
+        assert "MYSQL_TRAINER_PASSWORD=trainer-secret" in command
+        assert "MYSQL_TRAINER_PASSWORD=trainer-secret /python -m analyzer.training.train" in command
+
+    def test_mysql_trainer_password_is_shlex_quoted(self):
+        command = build_remote_dispatch_command(
+            staging_models_root=Path("/staging/run-1"),
+            calendar_code="KRX",
+            cache_dir=Path("/cache"),
+            data_as_of=date(2026, 8, 11),
+            feature_code_version="v1",
+            db_tunnel_host="nas-host",
+            db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="pass with spaces",
+        )
+
+        assert "MYSQL_TRAINER_PASSWORD='pass with spaces'" in command
 
     def test_python_executable_path_is_shlex_quoted(self):
         command = build_remote_dispatch_command(
@@ -322,6 +374,8 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
             python_executable_path=Path("/custom/venv bin/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
         )
 
         assert "'/custom/venv bin/python' -m analyzer.training.train" in command
@@ -339,6 +393,8 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
             python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
         )
 
         assert "trap" in command
@@ -357,6 +413,8 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
             python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
         )
 
         assert command.rstrip().endswith("exit $?") or "exit $TRAIN_EXIT_CODE" in command
@@ -376,6 +434,8 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/mount.sh"),
             python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
         )
 
         # 이스케이프되지 않은 형태(따옴표 없이 노출)로는 존재하지 않아야 한다 —
@@ -396,6 +456,8 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_key_path=Path("/run/secrets/db tunnel key"),
             mount_script_path=Path("/mount.sh"),
             python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
         )
 
         assert shlex.quote("/staging/run 1") in command
@@ -416,9 +478,12 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/custom/mount.sh"),
             python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
         )
 
-        assert "/custom/mount.sh && /python -m analyzer.training.train" in command
+        assert "/custom/mount.sh && MYSQL_HOST=127.0.0.1" in command
+        assert "/python -m analyzer.training.train" in command
 
     def test_mount_script_path_is_shlex_quoted(self):
         command = build_remote_dispatch_command(
@@ -431,6 +496,8 @@ class TestBuildRemoteDispatchCommand:
             db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
             mount_script_path=Path("/custom/mount script.sh"),
             python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
         )
 
         assert shlex.quote("/custom/mount script.sh") in command
