@@ -162,6 +162,17 @@ def _split_features_and_labels(
     return feature_columns, x, y
 
 
+_MARKET_CALENDAR_CODE_OVERRIDE: dict[str, str] = {"overseas": "NYSE"}
+"""`overseas` 시장은 호출자가 넘긴 `calendar_code`(도메스틱 기본값 "KRX")를
+공유하면 안 된다 — `market_calendar` 실측(2026-08-13): calendar_code='NYSE'의
+최초 거래일(2007-08-20)이 `labels.config.DEFAULT_START_DATES["overseas"]`와
+정확히 일치해, 해외용으로 이미 시딩돼 있었다. 이전 코드는 `calendar_code`를
+domestic/overseas 양쪽에 그대로 재사용해 미국 종목의 T+H(REQ-AL-030)를 KRX
+개장일 기준으로 계산하고, "KRX는 열고 미국은 휴장인 날"(추수감사절 등)을
+종목별 거래정지(`analyze_halt()`)로 오판하는 회귀 버그가 있었다 — 에러 없이
+레이블만 조용히 왜곡되는 유형이라 발견이 늦었다."""
+
+
 def _resolve_algorithm(model_key: tuple) -> str:
     """`models.train_pooled_models()`가 반환하는 키에서 저장용 algorithm 문자열을 뽑는다."""
     tag = model_key[2]
@@ -181,17 +192,18 @@ def run_training_pipeline(
 ) -> TrainingPipelineResult:
     """학습 파이프라인 전체를 순서대로 실행한다(design.md §4 진입점 계약).
 
-    각 시장(`training.models.MARKETS`)에 대해 데이터셋을 조회·조립·캐싱하고,
-    시장×horizon 4개 조합에 대해 16개 모델(8 포인트+8 분위수 보조)을
-    학습해 네이티브 포맷으로 저장한다. 예외가 발생하면 잡아
-    `TrainingPipelineResult(success=False, error=...)`로 반환한다 —
-    CLI 진입점(`main()`)이 이를 종료코드로 변환한다.
+    각 시장(`training.models.MARKETS`)에 대해 **시장별** 캘린더로 데이터셋을
+    조회·조립·캐싱하고(domestic=`calendar_code`, overseas=`NYSE` —
+    `_MARKET_CALENDAR_CODE_OVERRIDE`), 시장×horizon 4개 조합에 대해 16개
+    모델(8 포인트+8 분위수 보조)을 학습해 네이티브 포맷으로 저장한다.
+    예외가 발생하면 잡아 `TrainingPipelineResult(success=False, error=...)`로
+    반환한다 — CLI 진입점(`main()`)이 이를 종료코드로 변환한다.
     """
     try:
-        calendar = fetch_market_calendar(trainer_engine, calendar_code)
-
         data_by_combo: dict[tuple[str, int], tuple[np.ndarray, np.ndarray]] = {}
         for market in MARKETS:
+            market_calendar_code = _MARKET_CALENDAR_CODE_OVERRIDE.get(market, calendar_code)
+            calendar = fetch_market_calendar(trainer_engine, market_calendar_code)
             assembled = _assemble_market_dataset(
                 trainer_engine, calendar, market, cache_dir, data_as_of, feature_code_version
             )

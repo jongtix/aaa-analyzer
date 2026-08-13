@@ -101,13 +101,55 @@ class TestRunTrainingPipelineOrchestration:
             )
 
         assert result.success is True
-        # 캘린더 조회가 가장 먼저, 저장이 가장 나중이어야 한다.
+        # 캘린더 조회가 (시장별로) 가장 먼저 오고, 저장이 가장 나중이어야 한다.
         assert call_log[0] == "fetch_market_calendar"
         assert call_log[-1] == "save_model_native"
         assert call_log.index("train_pooled_models") > call_log.index("assemble_dataset_cached")
         assert call_log.index("save_model_native") > call_log.index("train_pooled_models")
-        # 시장(MARKETS) 개수만큼 데이터셋 조립이 호출되어야 한다.
+        # 시장(MARKETS) 개수만큼 데이터셋 조립 + 캘린더 조회가 호출되어야 한다
+        # (시장별 캘린더 — domestic=KRX/overseas=NYSE는 서로 다른 캘린더라
+        # 공유하면 안 된다, 2026-08-13 발견 회귀 버그).
         assert call_log.count("assemble_dataset_cached") == len(MARKETS)
+        assert call_log.count("fetch_market_calendar") == len(MARKETS)
+
+    def test_fetches_krx_calendar_for_domestic_and_nyse_for_overseas(self, tmp_path: Path):
+        """domestic/overseas가 동일 캘린더를 공유하면 미국 종목의 레이블이
+        KRX 개장일 기준으로 계산되고, KRX 개장+미국 휴장일(추수감사절 등)이
+        거래정지로 오판된다(회귀 버그, 2026-08-13 발견). `market_calendar` 실측:
+        calendar_code='NYSE'의 최초 거래일(2007-08-20)이
+        `DEFAULT_START_DATES["overseas"]`와 정확히 일치 — 해외용으로 이미
+        시딩돼 있었으나 코드가 소비하지 않고 있었다."""
+        calendar_code_log: list[str] = []
+
+        def _fetch_market_calendar(_engine, calendar_code):
+            calendar_code_log.append(calendar_code)
+            return TradingCalendar(calendar_code=calendar_code, trading_days=frozenset())
+
+        with (
+            patch.object(train_module, "fetch_market_calendar", side_effect=_fetch_market_calendar),
+            patch.object(
+                train_module,
+                "fetch_stock_universe",
+                return_value=pd.DataFrame({"stock_code": [], "grade": [], "delisted_at": []}),
+            ),
+            patch.object(train_module, "fetch_market_data", return_value=({}, {}, {})),
+            patch.object(
+                train_module.cache_module,
+                "assemble_dataset_cached",
+                return_value=_dummy_assembled_dataset(),
+            ),
+            patch.object(train_module, "train_pooled_models", return_value={}),
+        ):
+            run_training_pipeline(
+                trainer_engine=MagicMock(),
+                calendar_code="KRX",
+                cache_dir=tmp_path / "cache",
+                models_root=tmp_path / "models",
+                data_as_of=date(2026, 8, 8),
+                feature_code_version="v1",
+            )
+
+        assert calendar_code_log == ["KRX", "NYSE"]
 
     def test_returns_failure_result_when_a_stage_raises(self, tmp_path: Path):
         with patch.object(
