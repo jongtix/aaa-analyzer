@@ -7,6 +7,7 @@ REQ-AD-010(SQLAlchemy 엔진 구성)/REQ-AD-011(SELECT 전용 접근)/REQ-AD-012
 """
 
 from datetime import date
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -134,6 +135,32 @@ class TestFetchDailyOhlcv:
         _, kwargs = mock_read_sql.call_args
         assert kwargs["params"] == {"stock_code": "AAPL"}
 
+    def test_price_columns_cast_from_decimal_to_float64(self):
+        """MySQL DECIMAL(18,4) 컬럼은 pymysql이 `decimal.Decimal`(object dtype)로
+        반환한다 — `compute_technical_features()` 등 하류 피처 계산이 float 연산을
+        가정하므로, 여기서 float64로 캐스팅하지 않으면
+        `TypeError: unsupported operand type(s) for /: 'float' and 'decimal.Decimal'`로
+        즉시 크래시한다(2026-08-13 실측 재현, SPEC-ANALYZER-TRAIN-AUTOMATION-001 조사)."""
+        engine = MagicMock()
+        mock_df = pd.DataFrame(
+            {
+                "stock_code": ["005930"],
+                "trade_date": [date(2026, 1, 2)],
+                "open_price": [Decimal("100.0000")],
+                "high_price": [Decimal("101.0000")],
+                "low_price": [Decimal("99.0000")],
+                "close_price": [Decimal("100.5000")],
+                "volume": [1000],
+            }
+        )
+
+        with patch("analyzer.data.repository.pd.read_sql", return_value=mock_df):
+            result = fetch_daily_ohlcv(engine, "005930")
+
+        for column in ("open_price", "high_price", "low_price", "close_price"):
+            assert result[column].dtype == "float64"
+        assert result["open_price"].iloc[0] == 100.0
+
 
 class TestFetchCorporateEvents:
     """REQ-AD-011: corporate_events에 대한 SELECT 전용 접근."""
@@ -163,6 +190,32 @@ class TestFetchCorporateEvents:
         assert "stocks" in sql_text
         assert kwargs["params"] == {"stock_code": "005930"}
         assert isinstance(result, pd.DataFrame)
+
+    def test_cash_amount_and_stock_rate_cast_from_decimal_to_float64(self):
+        """`cash_amount`(DECIMAL(15,5))/`stock_rate`(DECIMAL(12,4))도 daily_ohlcv
+        가격 컬럼과 동일한 pymysql Decimal 반환 문제를 가진다(nullable — 배당
+        이벤트는 stock_rate가, 분할 이벤트는 cash_amount가 NULL)."""
+        engine = MagicMock()
+        mock_df = pd.DataFrame(
+            {
+                "stock_code": ["005930"],
+                "event_type": ["DIVIDEND"],
+                "event_date": [date(2026, 1, 2)],
+                "stock_rate": [None],
+                "cash_amount": [Decimal("500.00000")],
+                "event_subtype": ["일반배당"],
+                "ex_dividend_date": [date(2026, 1, 1)],
+                "currency_code": ["KRW"],
+            }
+        )
+
+        with patch("analyzer.data.repository.pd.read_sql", return_value=mock_df):
+            result = fetch_corporate_events(engine, "005930")
+
+        assert result["cash_amount"].dtype == "float64"
+        assert result["stock_rate"].dtype == "float64"
+        assert result["cash_amount"].iloc[0] == 500.0
+        assert pd.isna(result["stock_rate"].iloc[0])
 
 
 class TestIterDailyOhlcvByStock:

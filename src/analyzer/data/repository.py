@@ -60,6 +60,24 @@ _INVESTOR_TREND_QUERY = text(
     "ORDER BY i.trade_date"
 )
 
+_DECIMAL_COLUMNS_DAILY_OHLCV = ("open_price", "high_price", "low_price", "close_price")
+_DECIMAL_COLUMNS_CORPORATE_EVENTS = ("cash_amount", "stock_rate")
+
+
+def _cast_decimal_columns(df: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+    """MySQL `DECIMAL` 컬럼은 pymysql이 `decimal.Decimal`(object dtype)로 반환한다 —
+    `compute_technical_features()`/`compute_labels()`/`adjust_prices()` 등 하류
+    소비자가 전부 float 연산을 가정하므로, 여기(fetch 계층 단일 관문)에서
+    float64로 캐스팅하지 않으면 `TypeError: unsupported operand type(s) for
+    /: 'float' and 'decimal.Decimal'`로 즉시 크래시한다(2026-08-13 실측 재현).
+    `columns` 중 실제로 존재하는 것만 캐스팅한다 — 빈 결과 집합(컬럼이
+    선택되지 않은 경우)에서도 안전하다.
+    """
+    present = [c for c in columns if c in df.columns]
+    if present:
+        df[present] = df[present].apply(pd.to_numeric)
+    return df
+
 
 def build_engine(config: DbConfig) -> Engine:
     """`DbConfig`로부터 커넥션 풀링을 지원하는 SQLAlchemy 엔진을 구성한다(REQ-AD-010)."""
@@ -97,7 +115,8 @@ def fetch_daily_ohlcv(
         params["end_date"] = end_date
     sql += " ORDER BY d.trade_date"
 
-    return pd.read_sql(text(sql), engine, params=params)
+    df = pd.read_sql(text(sql), engine, params=params)
+    return _cast_decimal_columns(df, _DECIMAL_COLUMNS_DAILY_OHLCV)
 
 
 def fetch_corporate_events(engine: Engine, stock_code: str) -> pd.DataFrame:
@@ -105,7 +124,8 @@ def fetch_corporate_events(engine: Engine, stock_code: str) -> pd.DataFrame:
     if not stock_code:
         raise ValueError("stock_code는 비어 있을 수 없다")
 
-    return pd.read_sql(_CORPORATE_EVENTS_QUERY, engine, params={"stock_code": stock_code})
+    df = pd.read_sql(_CORPORATE_EVENTS_QUERY, engine, params={"stock_code": stock_code})
+    return _cast_decimal_columns(df, _DECIMAL_COLUMNS_CORPORATE_EVENTS)
 
 
 def fetch_investor_trend(engine: Engine, stock_code: str) -> pd.DataFrame:
