@@ -173,6 +173,7 @@ def build_remote_dispatch_command(
     db_tunnel_key_path: Path,
     mount_script_path: Path,
     db_tunnel_username: str = "db_tunnel",
+    db_tunnel_port: int = 22,
     db_tunnel_local_port: int = 3306,
     db_tunnel_remote_port: int = 3306,
 ) -> str:
@@ -185,6 +186,12 @@ def build_remote_dispatch_command(
     실행되면 로컬 디스크에 조용히 쓰거나 경로 없음으로 실패할 수 있다.
     마운트 실패 시 학습 CLI를 건너뛰고 마운트 스크립트의 종료코드를 그대로
     전달한다.
+
+    `db_tunnel_port`는 터널 SSH 접속 자체의 포트다(나스 sshd 포트) —
+    `db_tunnel_local_port`/`db_tunnel_remote_port`(-L 포워딩의 MySQL 포트,
+    3306)와는 별개이며, 이 둘을 혼동하면 나스가 비표준 SSH 포트를 쓸 때
+    (aaa-infra/docs/TECHSPEC.md §6.2) 터널 접속이 항상 거부된다(Stage 2
+    실측 검증 중 발견, 2026-08-13).
 
     `mount_script_path`는 필수 인자다 — 기본값(맥북 계정별 절대경로)의 유일한
     출처는 `config.py`의 `AutomationConfig`/`get_automation_config()`이며, 이
@@ -206,6 +213,7 @@ def build_remote_dispatch_command(
     tunnel_command = (
         f"ssh -f -N -o BatchMode=yes -o ExitOnForwardFailure=yes "
         f"-i {quoted_db_tunnel_key_path} "
+        f"-p {db_tunnel_port} "
         f"-L {db_tunnel_local_port}:127.0.0.1:{db_tunnel_remote_port} "
         f"{quoted_db_tunnel_username}@{quoted_db_tunnel_host}"
     )

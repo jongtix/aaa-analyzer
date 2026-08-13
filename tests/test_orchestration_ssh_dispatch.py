@@ -231,6 +231,28 @@ class TestBuildRemoteDispatchCommand:
         assert "db_tunnel@nas-host" in command
         assert "-L 3306:127.0.0.1:3306" in command
         assert "/run/secrets/db_tunnel_key" in command
+        assert "-p 22" in command  # 미지정 시 기본값 22
+
+    def test_db_tunnel_port_uses_configured_value(self):
+        """Stage 2 실측 검증(2026-08-13)에서 발견 — db_tunnel_port는 -L 포워딩
+        포트(db_tunnel_local_port/remote_port)와 별개로, 터널 SSH 접속 자체의
+        포트여야 한다(나스가 비표준 포트를 쓰는 경우 필수)."""
+        command = build_remote_dispatch_command(
+            staging_models_root=Path("/staging/run-1"),
+            calendar_code="KRX",
+            cache_dir=Path("/cache"),
+            data_as_of=date(2026, 8, 11),
+            feature_code_version="v1",
+            db_tunnel_host="nas-host",
+            db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
+            db_tunnel_port=55522,
+            db_tunnel_local_port=3306,
+            db_tunnel_remote_port=3306,
+        )
+
+        assert "-p 55522" in command
+        assert "-L 3306:127.0.0.1:3306" in command  # 포워딩 포트는 그대로 별개 유지
 
     def test_does_not_use_strict_host_key_checking_no_for_dispatch(self):
         """REQ-ATA-022 준수 — db_tunnel 터널 SSH 명령도 StrictHostKeyChecking=no를 쓰지 않는다."""

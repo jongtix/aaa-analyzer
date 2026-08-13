@@ -18,6 +18,7 @@ from analyzer.data.config import MissingConfigError
 
 _DEFAULT_SSH_PORT = 22
 _DEFAULT_DB_TUNNEL_USERNAME = "db_tunnel"
+_DEFAULT_DB_TUNNEL_SSH_PORT = 22
 _DEFAULT_DB_TUNNEL_PORT = 3306
 _DEFAULT_WEEKLY_TIMEOUT_SECONDS = 4 * 60 * 60
 _DEFAULT_MONTHLY_TIMEOUT_SECONDS = 36 * 60 * 60
@@ -59,6 +60,11 @@ class AutomationConfig:
 
     db_tunnel_host: str
     """REQ-ATA-031: 기존 `db_tunnel` 계정이 위치한 NAS 호스트."""
+    db_tunnel_port: int
+    """터널 SSH 접속 자체의 포트(나스 sshd 포트, aaa-infra/docs/TECHSPEC.md §6.2
+    비표준 55522 사용 참고) — db_tunnel_local_port/remote_port(-L 포워딩의 MySQL
+    포트, 3306)와는 별개다. 혼동해서 하나로 합치지 말 것(Stage 2 실측 검증 중
+    발견된 결함, 2026-08-13)."""
     db_tunnel_username: str
     db_tunnel_private_key_path: Path
     db_tunnel_local_port: int
@@ -103,6 +109,9 @@ def get_automation_config() -> AutomationConfig:
         ssh_private_key_path=Path(os.environ["TRAIN_AUTOMATION_SSH_KEY_PATH"]),
         known_hosts_path=Path(os.environ["TRAIN_AUTOMATION_KNOWN_HOSTS_PATH"]),
         db_tunnel_host=os.environ["TRAIN_AUTOMATION_DB_TUNNEL_HOST"],
+        db_tunnel_port=int(
+            os.environ.get("TRAIN_AUTOMATION_DB_TUNNEL_SSH_PORT", str(_DEFAULT_DB_TUNNEL_SSH_PORT))
+        ),
         db_tunnel_username=os.environ.get(
             "TRAIN_AUTOMATION_DB_TUNNEL_USERNAME", _DEFAULT_DB_TUNNEL_USERNAME
         ),

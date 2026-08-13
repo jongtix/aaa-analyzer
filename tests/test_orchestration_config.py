@@ -46,6 +46,7 @@ class TestGetAutomationConfig:
             ssh_private_key_path=Path("/run/secrets/dispatch_key"),
             known_hosts_path=Path("/run/secrets/known_hosts"),
             db_tunnel_host="nas-host",
+            db_tunnel_port=22,
             db_tunnel_username="db_tunnel",
             db_tunnel_private_key_path=Path("/run/secrets/db_tunnel_key"),
             db_tunnel_local_port=3306,
@@ -84,6 +85,23 @@ class TestGetAutomationConfig:
         config = get_automation_config()
 
         assert config.ssh_port == 2222
+
+    def test_optional_db_tunnel_port_override(self, monkeypatch: pytest.MonkeyPatch):
+        """Stage 2 실측 검증(2026-08-13)에서 발견 — 나스 sshd가 비표준 포트를
+        쓸 때 터널 SSH 접속 포트를 오버라이드할 수 있어야 한다."""
+        _set_required_env(monkeypatch)
+        monkeypatch.setenv("TRAIN_AUTOMATION_DB_TUNNEL_SSH_PORT", "55522")
+
+        config = get_automation_config()
+
+        assert config.db_tunnel_port == 55522
+
+    def test_default_db_tunnel_port_is_twenty_two(self, monkeypatch: pytest.MonkeyPatch):
+        _set_required_env(monkeypatch)
+
+        config = get_automation_config()
+
+        assert config.db_tunnel_port == 22
 
     def test_optional_timeout_overrides(self, monkeypatch: pytest.MonkeyPatch):
         _set_required_env(monkeypatch)
