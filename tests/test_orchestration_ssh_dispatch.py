@@ -936,6 +936,32 @@ class TestReadLoopCompletionRequiresExitCodePath:
         assert mock_channel.exit_status_ready.call_count == 3
 
 
+class TestChannelDrainStderrStream:
+    """REQ-ATO-001: 채널 드레인 루프는 stdout뿐 아니라 stderr도 동일하게
+    소비하고 라인 단위로 콜백에 전달해야 한다."""
+
+    def test_stderr_chunks_are_drained_and_relayed(self, tmp_path: Path):
+        connection = _make_connection_with_mocked_client(tmp_path)
+        mock_transport = MagicMock()
+        mock_channel = MagicMock()
+        mock_channel.recv_ready.return_value = False
+        recv_stderr_ready_sequence = iter([True, False])
+        mock_channel.recv_stderr_ready.side_effect = lambda: next(recv_stderr_ready_sequence, False)
+        mock_channel.recv_stderr.return_value = b"stderr line\n"
+        mock_channel.exit_status_ready.return_value = True
+        mock_channel.recv_exit_status.return_value = 0
+        mock_transport.open_session.return_value = mock_channel
+        connection._client.get_transport.return_value = mock_transport  # pyright: ignore[reportAttributeAccessIssue]
+        received_lines: list[str] = []
+
+        result = connection.exec_command(
+            "cmd", timeout_seconds=5.0, on_output_line=received_lines.append
+        )
+
+        assert result == CommandResult(exit_code=0)
+        assert received_lines == ["stderr line"]
+
+
 class TestChannelDrainPartialLineBuffering:
     """acceptance.md §B 경계 사례: 라인 경계 없이 부분 라인만 수신한 경우,
     버퍼링 후 다음 read에서 결합해 완전한 라인 단위로만 콜백을 호출해야 한다."""
