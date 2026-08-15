@@ -252,6 +252,8 @@ class TestBuildRemoteDispatchCommand:
             python_executable_path=Path("/python"),
             mysql_database="aaa",
             mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-1",
             db_tunnel_username="db_tunnel",
             db_tunnel_local_port=3306,
             db_tunnel_remote_port=3306,
@@ -278,6 +280,8 @@ class TestBuildRemoteDispatchCommand:
             python_executable_path=Path("/python"),
             mysql_database="aaa",
             mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-2",
             db_tunnel_port=55522,
             db_tunnel_local_port=3306,
             db_tunnel_remote_port=3306,
@@ -300,6 +304,8 @@ class TestBuildRemoteDispatchCommand:
             python_executable_path=Path("/python"),
             mysql_database="aaa",
             mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-3",
         )
 
         assert "StrictHostKeyChecking=no" not in command
@@ -318,6 +324,8 @@ class TestBuildRemoteDispatchCommand:
             python_executable_path=Path("/python"),
             mysql_database="aaa",
             mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-4",
         )
 
         assert "python -m analyzer.training.train" in command
@@ -343,6 +351,8 @@ class TestBuildRemoteDispatchCommand:
             python_executable_path=Path("/Users/mac/aaa/aaa-analyzer/.venv/bin/python"),
             mysql_database="aaa",
             mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-5",
         )
 
         assert "/Users/mac/aaa/aaa-analyzer/.venv/bin/python -m analyzer.training.train" in command
@@ -364,6 +374,8 @@ class TestBuildRemoteDispatchCommand:
             python_executable_path=Path("/python"),
             mysql_database="aaa",
             mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-6",
             db_tunnel_local_port=13306,
         )
 
@@ -385,6 +397,8 @@ class TestBuildRemoteDispatchCommand:
             python_executable_path=Path("/python"),
             mysql_database="aaa",
             mysql_trainer_password="pass with spaces",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-7",
         )
 
         assert "MYSQL_TRAINER_PASSWORD='pass with spaces'" in command
@@ -402,6 +416,8 @@ class TestBuildRemoteDispatchCommand:
             python_executable_path=Path("/custom/venv bin/python"),
             mysql_database="aaa",
             mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-8",
         )
 
         assert "'/custom/venv bin/python' -m analyzer.training.train" in command
@@ -421,6 +437,8 @@ class TestBuildRemoteDispatchCommand:
             python_executable_path=Path("/python"),
             mysql_database="aaa",
             mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-9",
         )
 
         assert "trap" in command
@@ -441,6 +459,8 @@ class TestBuildRemoteDispatchCommand:
             python_executable_path=Path("/python"),
             mysql_database="aaa",
             mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-10",
         )
 
         assert command.rstrip().endswith("exit $?") or "exit $TRAIN_EXIT_CODE" in command
@@ -462,6 +482,8 @@ class TestBuildRemoteDispatchCommand:
             python_executable_path=Path("/python"),
             mysql_database="aaa",
             mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-11",
         )
 
         # 이스케이프되지 않은 형태(따옴표 없이 노출)로는 존재하지 않아야 한다 —
@@ -484,6 +506,8 @@ class TestBuildRemoteDispatchCommand:
             python_executable_path=Path("/python"),
             mysql_database="aaa",
             mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-12",
         )
 
         assert shlex.quote("/staging/run 1") in command
@@ -506,6 +530,8 @@ class TestBuildRemoteDispatchCommand:
             python_executable_path=Path("/python"),
             mysql_database="aaa",
             mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-13",
         )
 
         assert "/custom/mount.sh && MYSQL_HOST=127.0.0.1" in command
@@ -524,9 +550,76 @@ class TestBuildRemoteDispatchCommand:
             python_executable_path=Path("/python"),
             mysql_database="aaa",
             mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-14",
         )
 
         assert shlex.quote("/custom/mount script.sh") in command
+
+    def test_includes_trainer_file_redirection_with_run_id_filename(self):
+        """AC-ATO-005/REQ-ATO-004/005: 트레이너 파일은 `trainer_<run_id>.log`
+        이름으로 `trainer_log_base_dir` 아래 원문 stdout/stderr 전체를 기록한다."""
+        command = build_remote_dispatch_command(
+            staging_models_root=Path("/staging/run-1"),
+            calendar_code="KRX",
+            cache_dir=Path("/cache"),
+            data_as_of=date(2026, 8, 11),
+            feature_code_version="v1",
+            db_tunnel_host="nas-host",
+            db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-abc123",
+        )
+
+        expected_path = shlex.quote("/logs/analyzer/trainer_run-abc123.log")
+        assert f"2>&1 | tee {expected_path}" in command
+
+    def test_trainer_file_redirection_starts_after_mount_gate(self):
+        """AC-ATO-018(REQ-ATO-008): 트레이너 파일 리다이렉션(tee)은 마운트
+        확인 명령의 `&&` 이후에 위치해야 한다 — 마운트 실패 시 리다이렉션이
+        시도되지 않아야 한다."""
+        command = build_remote_dispatch_command(
+            staging_models_root=Path("/staging/run-1"),
+            calendar_code="KRX",
+            cache_dir=Path("/cache"),
+            data_as_of=date(2026, 8, 11),
+            feature_code_version="v1",
+            db_tunnel_host="nas-host",
+            db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/custom/mount.sh"),
+            python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-15",
+        )
+
+        mount_gate_index = command.index("/custom/mount.sh &&")
+        tee_index = command.index("| tee ")
+        assert mount_gate_index < tee_index
+
+    def test_trainer_log_base_dir_is_shlex_quoted(self):
+        command = build_remote_dispatch_command(
+            staging_models_root=Path("/staging/run-1"),
+            calendar_code="KRX",
+            cache_dir=Path("/cache"),
+            data_as_of=date(2026, 8, 11),
+            feature_code_version="v1",
+            db_tunnel_host="nas-host",
+            db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs dir/analyzer"),
+            run_id="run-16",
+        )
+
+        assert shlex.quote("/logs dir/analyzer/trainer_run-16.log") in command
 
 
 class TestPromoteStagingToActive:

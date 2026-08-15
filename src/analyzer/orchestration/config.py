@@ -39,6 +39,7 @@ _REQUIRED_ENV_VARS = (
     "TRAIN_AUTOMATION_CACHE_DIR",
     "TRAIN_AUTOMATION_MOUNT_SCRIPT_PATH",
     "TRAIN_AUTOMATION_PYTHON_PATH",
+    "TRAIN_AUTOMATION_TRAINER_LOG_BASE_DIR",
     "MYSQL_DATABASE",
     "MYSQL_TRAINER_PASSWORD",
 )
@@ -112,6 +113,14 @@ class AutomationConfig:
     자신의 `MYSQL_TRAINER_PASSWORD`와 동일 값을 재사용한다(신규 시크릿
     아님, TRAIN-001 REQ-AT-010/011 계약)."""
 
+    trainer_log_base_dir: Path
+    """SPEC-ANALYZER-TRAIN-OBSV-001 REQ-ATO-005: 트레이너 파일(`trainer_<run_id>.log`)
+    목적지 디렉토리 — 맥 로컬 SMB 마운트 지점의 절대경로다. `mount_script_path`/
+    `python_executable_path`와 동일 계열(계정별 절대경로)이므로 기본값을 두지
+    않는다. analyzer 프로세스는 `aaa-infra` 전용 셸 변수(`AAA_HDD_BASE`)를
+    직접 읽지 않는다 — 이 필드가 이미 프로세스 환경에 반영된 리터럴 절대경로
+    값만 소비한다(spec.md §4.5)."""
+
 
 def get_automation_config() -> AutomationConfig:
     """`TRAIN_AUTOMATION_*` 환경변수를 읽어 `AutomationConfig`를 구성한다.
@@ -172,4 +181,5 @@ def get_automation_config() -> AutomationConfig:
         python_executable_path=Path(os.environ["TRAIN_AUTOMATION_PYTHON_PATH"]),
         mysql_database=os.environ["MYSQL_DATABASE"],
         mysql_trainer_password=os.environ["MYSQL_TRAINER_PASSWORD"],
+        trainer_log_base_dir=Path(os.environ["TRAIN_AUTOMATION_TRAINER_LOG_BASE_DIR"]),
     )

@@ -48,6 +48,7 @@ def _make_config(tmp_path: Path) -> AutomationConfig:
         python_executable_path=tmp_path / ".venv" / "bin" / "python",
         mysql_database="aaa",
         mysql_trainer_password="trainer-secret",
+        trainer_log_base_dir=tmp_path / "logs" / "aaa-analyzer",
     )
 
 

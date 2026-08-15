@@ -25,6 +25,7 @@ _REQUIRED_ENV = {
     "TRAIN_AUTOMATION_CACHE_DIR": "/cache",
     "TRAIN_AUTOMATION_MOUNT_SCRIPT_PATH": "/Users/mac/aaa/scripts/mount-nas-hdd1.sh",
     "TRAIN_AUTOMATION_PYTHON_PATH": "/Users/mac/aaa/aaa-analyzer/.venv/bin/python",
+    "TRAIN_AUTOMATION_TRAINER_LOG_BASE_DIR": "/Users/mac/aaa/mnt/HDD_1/Development/aaa/logs",
     "MYSQL_DATABASE": "aaa",
     "MYSQL_TRAINER_PASSWORD": "trainer-secret",
 }
@@ -66,6 +67,7 @@ class TestGetAutomationConfig:
             python_executable_path=Path("/Users/mac/aaa/aaa-analyzer/.venv/bin/python"),
             mysql_database="aaa",
             mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/Users/mac/aaa/mnt/HDD_1/Development/aaa/logs"),
         )
 
     def test_raises_when_required_env_var_missing(self, monkeypatch: pytest.MonkeyPatch):

@@ -16,12 +16,15 @@ SSH 종료코드 0 확인 후에만 호출되며, 그 외 모든 경로(WoL 실�
 모두 이 함수의 호출 순서에 의존한다(REQ-ATA-062).
 """
 
+import json
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal
 
+from analyzer.common.logging import get_logger
 from analyzer.orchestration.config import AutomationConfig
 from analyzer.orchestration.failure import TrainingRunFailure, handle_training_run_failure
 from analyzer.orchestration.metrics import TrainingMetrics
@@ -34,6 +37,28 @@ from analyzer.orchestration.ssh_dispatch import (
 from analyzer.orchestration.wol import WolSender, send_with_retry
 
 RunKind = Literal["weekly", "monthly"]
+
+_logger = get_logger(__name__)
+
+
+def _make_stage_marker_relay(logger: logging.Logger) -> Callable[[str], None]:
+    """SPEC-ANALYZER-TRAIN-OBSV-001 REQ-ATO-002(D-NEW-1): 채널 드레인 루프가
+    소비한 원격 stdout/stderr 라인 중, JSON 로그 레코드의 `stage_marker: true`
+    필드로 식별되는 저볼륨 부분집합만 NAS 측 analyzer 자신의 기존 구조화
+    로거로 릴레이한다. 파싱 실패 라인이나 `stage_marker`가 없거나 `false`인
+    라인(상세 로그)은 릴레이하지 않는다(REQ-ATO-007 — 트레이너 파일이
+    원문 전량을 별도로 보존하므로 이중 적재하지 않는다)."""
+
+    def _relay(line: str) -> None:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError, TypeError:
+            return
+        if not isinstance(record, dict) or record.get("stage_marker") is not True:
+            return
+        logger.info("remote stage marker: %s", record.get("message", line))
+
+    return _relay
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,10 +141,16 @@ def execute_scheduled_training_run(
         python_executable_path=config.python_executable_path,
         mysql_database=config.mysql_database,
         mysql_trainer_password=config.mysql_trainer_password,
+        trainer_log_base_dir=config.trainer_log_base_dir,
+        run_id=run_id,
     )
 
     try:
-        result = connection.exec_command(command, timeout_seconds=timeout_seconds)
+        result = connection.exec_command(
+            command,
+            timeout_seconds=timeout_seconds,
+            on_output_line=_make_stage_marker_relay(_logger),
+        )
 
         if result.timed_out:
             failure = TrainingRunFailure(

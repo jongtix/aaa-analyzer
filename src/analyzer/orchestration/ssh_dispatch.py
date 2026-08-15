@@ -267,6 +267,8 @@ def build_remote_dispatch_command(
     python_executable_path: Path,
     mysql_database: str,
     mysql_trainer_password: str,
+    trainer_log_base_dir: Path,
+    run_id: str,
     db_tunnel_username: str = "db_tunnel",
     db_tunnel_port: int = 22,
     db_tunnel_local_port: int = 3306,
@@ -321,6 +323,8 @@ def build_remote_dispatch_command(
     quoted_python_executable_path = shlex.quote(str(python_executable_path))
     quoted_mysql_database = shlex.quote(mysql_database)
     quoted_mysql_trainer_password = shlex.quote(mysql_trainer_password)
+    trainer_log_path = trainer_log_base_dir / f"trainer_{run_id}.log"
+    quoted_trainer_log_path = shlex.quote(str(trainer_log_path))
 
     tunnel_command = (
         f"ssh -f -N -o BatchMode=yes -o ExitOnForwardFailure=yes "
@@ -339,8 +343,16 @@ def build_remote_dispatch_command(
         f"--cache-dir {quoted_cache_dir} "
         f"--models-root {quoted_staging_models_root} "
         f"--data-as-of {quoted_data_as_of} "
-        f"--feature-code-version {quoted_feature_code_version}"
+        f"--feature-code-version {quoted_feature_code_version} "
+        # REQ-ATO-004/007: stdout/stderr 전체를 트레이너 파일에 원문 그대로
+        # 영속 기록하면서(tee), 동일 바이트가 여전히 SSH 채널(stdout)로도
+        # 흘러가게 유지한다 — 채널 드레인 루프(REQ-ATO-001)가 그 스트림을
+        # 계속 소비하고, stage_marker 필드 기반 저볼륨 릴레이(REQ-ATO-002)만
+        # 걸러 릴레이한다. `set -o pipefail`(아래)이 tee를 거친 뒤에도
+        # train_command 자신의 종료코드가 최종 결과로 전달되게 한다.
+        f"2>&1 | tee {quoted_trainer_log_path}"
     )
+
     tunnel_pattern = f"{db_tunnel_local_port}:127.0.0.1:{db_tunnel_remote_port}"
     return (
         f"set -o pipefail; "

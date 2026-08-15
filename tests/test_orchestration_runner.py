@@ -5,6 +5,7 @@ WoL→SSH→터널+디스패치→완료감지→프로모션/실패처리 전�
 `@pytest.mark.integration`이 아닌 일반 단위 테스트다.
 """
 
+import logging
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
@@ -17,7 +18,7 @@ from analyzer.orchestration.metrics import (
     TRAINING_RUN_TOTAL_NAME,
     TrainingMetrics,
 )
-from analyzer.orchestration.runner import execute_scheduled_training_run
+from analyzer.orchestration.runner import _make_stage_marker_relay, execute_scheduled_training_run
 from analyzer.orchestration.ssh_dispatch import CommandResult
 
 
@@ -94,7 +95,54 @@ def _make_config(tmp_path: Path) -> AutomationConfig:
         python_executable_path=tmp_path / ".venv" / "bin" / "python",
         mysql_database="aaa",
         mysql_trainer_password="trainer-secret",
+        trainer_log_base_dir=tmp_path / "logs" / "aaa-analyzer",
     )
+
+
+class TestMakeStageMarkerRelay:
+    """AC-ATO-003(REQ-ATO-002/007, D-NEW-1): stage_marker:true JSON 레코드만
+    릴레이하고, 상세 로그(필드 없음/false)나 비-JSON 라인은 릴레이하지 않는다."""
+
+    def test_relays_stage_marker_true_records(self):
+        logger = logging.getLogger("test-relay")
+        relayed: list[str] = []
+        logger.info = lambda msg, *args: relayed.append(msg % args if args else msg)  # type: ignore[method-assign]
+        relay = _make_stage_marker_relay(logger)
+
+        relay('{"stage_marker": true, "message": "market start"}')
+
+        assert len(relayed) == 1
+        assert "market start" in relayed[0]
+
+    def test_does_not_relay_records_without_stage_marker_field(self):
+        logger = logging.getLogger("test-relay-2")
+        relayed: list[str] = []
+        logger.info = lambda *a, **k: relayed.append(a)  # type: ignore[method-assign]
+        relay = _make_stage_marker_relay(logger)
+
+        relay('{"message": "detailed progress line"}')
+
+        assert relayed == []
+
+    def test_does_not_relay_stage_marker_false_records(self):
+        logger = logging.getLogger("test-relay-3")
+        relayed: list[str] = []
+        logger.info = lambda *a, **k: relayed.append(a)  # type: ignore[method-assign]
+        relay = _make_stage_marker_relay(logger)
+
+        relay('{"stage_marker": false, "message": "detailed"}')
+
+        assert relayed == []
+
+    def test_ignores_non_json_lines_without_raising(self):
+        logger = logging.getLogger("test-relay-4")
+        relayed: list[str] = []
+        logger.info = lambda *a, **k: relayed.append(a)  # type: ignore[method-assign]
+        relay = _make_stage_marker_relay(logger)
+
+        relay("plain text traceback line, not JSON")
+
+        assert relayed == []
 
 
 class TestExecuteScheduledTrainingRunSuccess:
@@ -372,9 +420,14 @@ class TestExecuteScheduledTrainingRunTunnelTeardown:
         captured_timeouts: list[float] = []
         original_exec = connection.exec_command
 
-        def _capturing_exec(command: str, timeout_seconds: float) -> CommandResult:
+        def _capturing_exec(
+            command: str,
+            timeout_seconds: float,
+            *,
+            on_output_line: Callable[[str], None] | None = None,
+        ) -> CommandResult:
             captured_timeouts.append(timeout_seconds)
-            return original_exec(command, timeout_seconds)
+            return original_exec(command, timeout_seconds, on_output_line=on_output_line)
 
         connection.exec_command = _capturing_exec  # type: ignore[method-assign]
 
