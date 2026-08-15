@@ -58,6 +58,14 @@ class JsonFormatter(logging.Formatter):
         }
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
+        # SPEC-ANALYZER-TRAIN-OBSV-001 REQ-ATO-002/018/019/021: 호출부가
+        # `extra={"stage_marker": True}`로 명시한 레코드만 이 필드를 payload에
+        # 포함한다 — 원격 채널 드레인 릴레이가 이 필드로 저볼륨 단계 전이
+        # 로그만 걸러 릴레이한다(D-NEW-1). 지정하지 않은 기존 호출은 필드
+        # 자체가 없어 하위 호환된다(기존 exact-key-set 테스트 불변).
+        stage_marker = getattr(record, "stage_marker", None)
+        if stage_marker is not None:
+            payload["stage_marker"] = stage_marker
         return json.dumps(payload, ensure_ascii=False)
 
 

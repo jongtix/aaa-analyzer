@@ -57,6 +57,11 @@ from typing import Protocol
 
 import paramiko
 
+from analyzer.common.logging import get_logger
+
+_logger = get_logger(__name__)
+
+
 _DEFAULT_CONNECT_TIMEOUT_SECONDS = 15.0
 """paramiko 기본값(None=무기한 블로킹)은 REQ-ATA-021의 10초×6회 재시도 설계를
 무력화한다 — 첫 시도가 멈추면 재시도 루프에 도달하지 못한다."""
@@ -247,10 +252,22 @@ def connect_with_retry(
     for attempt in range(1, max_retries + 1):
         try:
             connection.connect()
+            # REQ-ATO-021: SSH 연결 성공/시도 횟수 단계 전이 로그.
+            _logger.info(
+                "ssh connect succeeded attempt=%d/%d",
+                attempt,
+                max_retries,
+                extra={"stage_marker": True},
+            )
             return True
         except Exception:  # noqa: BLE001 — 재시도 경계에서 포착
             if attempt < max_retries:
                 sleep_fn(interval_seconds)
+    _logger.error(
+        "ssh connect failed after max retries attempts=%d",
+        max_retries,
+        extra={"stage_marker": True},
+    )
     return False
 
 

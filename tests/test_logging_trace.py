@@ -105,6 +105,26 @@ class TestJsonFormatter:
 
         assert parsed.get("trace_id") is None
 
+    def test_format_includes_stage_marker_when_extra_sets_it(self):
+        """SPEC-ANALYZER-TRAIN-OBSV-001 REQ-ATO-002/D-NEW-1."""
+        formatter = JsonFormatter()
+        record = self._make_record()
+        record.stage_marker = True
+
+        output = formatter.format(record)
+        parsed = json.loads(output)
+
+        assert parsed["stage_marker"] is True
+
+    def test_format_omits_stage_marker_when_not_set(self):
+        formatter = JsonFormatter()
+        record = self._make_record()
+
+        output = formatter.format(record)
+        parsed = json.loads(output)
+
+        assert "stage_marker" not in parsed
+
 
 class TestGetLogger:
     def test_get_logger_returns_logger_with_json_formatter(self):

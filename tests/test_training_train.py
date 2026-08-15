@@ -168,7 +168,35 @@ class TestRunTrainingPipelineOrchestration:
         assert result.error is not None
         assert "DB 연결 실패" in result.error
 
+    def test_failure_logs_full_traceback_and_error_field_stays_string(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        """AC-ATO-012(REQ-ATO-020): 실패 시 전체 traceback이 로그로 남고,
+        TrainingPipelineResult.error는 여전히 문자열 메시지만 담는다(반환 타입 불변)."""
+        with (
+            caplog.at_level("ERROR", logger="analyzer.training.train"),
+            patch.object(
+                train_module, "fetch_market_calendar", side_effect=RuntimeError("DB 연결 실패")
+            ),
+        ):
+            result = run_training_pipeline(
+                trainer_engine=MagicMock(),
+                calendar_code="KRX",
+                cache_dir=tmp_path / "cache",
+                models_root=tmp_path / "models",
+                data_as_of=date(2026, 8, 8),
+                feature_code_version="v1",
+            )
+
+        assert isinstance(result.error, str)
+        error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(error_records) >= 1
+        assert error_records[0].exc_info is not None
+        assert "RuntimeError" in caplog.text
+        assert "DB 연결 실패" in caplog.text
+
     def test_success_result_is_a_dataclass_with_saved_paths(self):
+
         result = TrainingPipelineResult(success=True, saved_model_paths=[Path("/tmp/a.txt")])
 
         assert result.success is True

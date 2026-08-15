@@ -31,7 +31,12 @@ import lightgbm as lgb
 import numpy as np
 import xgboost as xgb
 
+from analyzer.common.logging import get_logger
+
+logger = get_logger(__name__)
+
 MARKETS: tuple[str, ...] = ("domestic", "overseas")
+
 HORIZONS: tuple[int, ...] = (20, 60)
 QUANTILE_ALPHAS: tuple[float, ...] = (0.10, 0.90)
 
@@ -83,10 +88,30 @@ def train_pooled_models(
         use_early_stopping = eval_data is not None and early_stopping_rounds is not None
         effective_rounds = early_stopping_rounds if use_early_stopping else None
 
+        # REQ-ATO-019: 모델 조합별(시장×horizon×algorithm) 학습 시작/완료 단계
+        # 전이 로그.
+        logger.info(
+            "model training start market=%s horizon=%s algorithm=lightgbm",
+            market,
+            horizon,
+            extra={"stage_marker": True},
+        )
         lgbm_model = lgb.LGBMRegressor(**resolved_lgbm_params)
         _fit_lgbm(lgbm_model, x, y, eval_data, effective_rounds)
         models[(market, horizon, "lightgbm")] = lgbm_model
+        logger.info(
+            "model training complete market=%s horizon=%s algorithm=lightgbm",
+            market,
+            horizon,
+            extra={"stage_marker": True},
+        )
 
+        logger.info(
+            "model training start market=%s horizon=%s algorithm=xgboost",
+            market,
+            horizon,
+            extra={"stage_marker": True},
+        )
         xgb_extra = {"early_stopping_rounds": early_stopping_rounds} if use_early_stopping else {}
         xgb_model = xgb.XGBRegressor(**resolved_xgb_params, **xgb_extra)
         if use_early_stopping:
@@ -94,12 +119,32 @@ def train_pooled_models(
         else:
             xgb_model.fit(x, y)
         models[(market, horizon, "xgboost")] = xgb_model
+        logger.info(
+            "model training complete market=%s horizon=%s algorithm=xgboost",
+            market,
+            horizon,
+            extra={"stage_marker": True},
+        )
 
         for alpha in QUANTILE_ALPHAS:
+            logger.info(
+                "model training start market=%s horizon=%s algorithm=lightgbm_quantile alpha=%s",
+                market,
+                horizon,
+                alpha,
+                extra={"stage_marker": True},
+            )
             quantile_params = {**resolved_lgbm_params, "objective": "quantile", "alpha": alpha}
             quantile_model = lgb.LGBMRegressor(**quantile_params)
             _fit_lgbm(quantile_model, x, y, eval_data, effective_rounds)
             models[(market, horizon, "lightgbm_quantile", alpha)] = quantile_model
+            logger.info(
+                "model training complete market=%s horizon=%s algorithm=lightgbm_quantile alpha=%s",
+                market,
+                horizon,
+                alpha,
+                extra={"stage_marker": True},
+            )
 
     return models
 

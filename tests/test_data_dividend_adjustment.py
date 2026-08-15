@@ -268,3 +268,46 @@ class TestMissingPriorCloseDefensiveSkip:
         result = adjust_prices(df, events, as_of_date=date(2024, 6, 20), calendar=cal)
 
         pd.testing.assert_frame_equal(result, df)
+
+
+class TestSkipBatchAggregation:
+    """AC-ATO-010(REQ-ATO-017): 배당 스킵 경고는 건별 개별 로그 대신 25건마다
+    1회 집계 로그로 남기며, 각 집계 경고는 대상 식별자를 나열한다."""
+
+    def test_forty_currency_mismatch_skips_emit_two_batched_warnings(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        cal = _calendar(frozenset({date(2024, 6, 7), date(2024, 6, 10)}))
+        df = pd.DataFrame(
+            {"trade_date": [date(2024, 6, 5)], "close_price": [40000.0], "volume": [100]}
+        )
+        events = pd.DataFrame(
+            {
+                "event_type": ["DIVIDEND"] * 40,
+                "event_date": [date(2024, 6, 5)] * 40,
+                "cash_amount": [500.0] * 40,
+                "event_subtype": ["결산"] * 40,
+                "ex_dividend_date": [date(2024, 6, 10)] * 40,
+                "currency_code": ["USD"] * 40,  # KRX 시장은 KRW를 기대 — 전건 불일치
+                "stock_code": [f"S{i:04d}" for i in range(40)],
+            }
+        )
+
+        with caplog.at_level("WARNING"):
+            adjust_prices(df, events, as_of_date=date(2024, 6, 20), calendar=cal)
+
+        warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warning_records) == 2  # 1~25건, 26~40건
+        assert "S0000" in warning_records[0].getMessage()
+        assert "S0024" in warning_records[0].getMessage()
+        assert "S0025" in warning_records[1].getMessage()
+        assert "S0039" in warning_records[1].getMessage()
+
+    def test_zero_skips_emit_no_warning(self, caplog: pytest.LogCaptureFixture):
+        """acceptance.md §B 경계 사례: 마지막 배치가 0건짜리 빈 로그를 남기지 않는다."""
+        from analyzer.data.dividend_adjustment import _log_skip_batches
+
+        with caplog.at_level("WARNING"):
+            _log_skip_batches("통화 불일치", [])
+
+        assert caplog.records == []

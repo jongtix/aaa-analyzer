@@ -41,6 +41,21 @@ logger = logging.getLogger(__name__)
 
 _PRICE_COLUMN_SUFFIX = "_price"
 _KRX_CALENDAR_CODES = frozenset({"KRX"})
+_SKIP_LOG_BATCH_SIZE = 25
+"""SPEC-ANALYZER-TRAIN-OBSV-001 REQ-ATO-017: 배당 스킵 경고는 건별 개별
+로그 대신 25건마다 1회 집계 로그로 남긴다 — 사용자가 확정한 값이므로
+코드 상수로 고정한다(환경변수 오버라이드 없음)."""
+
+
+def _log_skip_batches(category: str, identifiers: list[object]) -> None:
+    """REQ-ATO-017: 스킵된 대상 식별자를 25건 배치로 나눠 집계 경고 로그를 남긴다.
+
+    빈 리스트면 아무 로그도 남기지 않는다(마지막 배치가 0건짜리 빈 로그를
+    남기지 않아야 한다는 경계 조건, acceptance.md §B).
+    """
+    for start in range(0, len(identifiers), _SKIP_LOG_BATCH_SIZE):
+        batch = identifiers[start : start + _SKIP_LOG_BATCH_SIZE]
+        logger.warning("DIVIDEND 조정 %s(으)로 skip된 대상 배치: %s", category, batch)
 
 
 def _settlement_market(calendar_code: str) -> str:
@@ -90,15 +105,12 @@ def adjust_dividend(
 
     multiplier = pd.Series(1.0, index=df.index)
     applied_any = False
+    currency_mismatch_skips: list[object] = []
+    missing_prev_close_skips: list[object] = []
     for _, event in valid.iterrows():
         currency_code = event.get("currency_code")
         if currency_code != expected_currency:
-            logger.warning(
-                "DIVIDEND 이벤트 통화 불일치로 skip: stock_code=%s, expected=%s, actual=%s",
-                event.get("stock_code"),
-                expected_currency,
-                currency_code,
-            )
+            currency_mismatch_skips.append(event.get("stock_code"))
             continue
 
         ex_date = _resolve_ex_date(event, calendar)
@@ -108,11 +120,7 @@ def adjust_dividend(
         prev_trading_day = calendar.prev_trading_day(ex_date)
         prev_close_rows = df.loc[df["trade_date"] == prev_trading_day, "close_price"]
         if prev_close_rows.empty:
-            logger.warning(
-                "DIVIDEND 디플레이터 계산 불가(전일 종가 없음)로 skip: stock_code=%s, ex_date=%s",
-                event.get("stock_code"),
-                ex_date,
-            )
+            missing_prev_close_skips.append(event.get("stock_code"))
             continue
 
         close_price_on_ex_date_prev = prev_close_rows.iloc[0]
@@ -121,6 +129,10 @@ def adjust_dividend(
         affected = df["trade_date"] < ex_date
         multiplier.loc[affected] *= deflator
         applied_any = True
+
+    # REQ-ATO-017: 건별 개별 로그 대신 25건 배치 집계 로그로 남긴다.
+    _log_skip_batches("통화 불일치", currency_mismatch_skips)
+    _log_skip_batches("전일 종가 없음", missing_prev_close_skips)
 
     if not applied_any:
         return df

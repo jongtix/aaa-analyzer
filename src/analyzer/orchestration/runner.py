@@ -98,6 +98,13 @@ def execute_scheduled_training_run(
     별도 분기를 추가하지 않는다.
     """
     wol_result = send_with_retry(wol_sender, config.target_mac_address, max_retries=wol_max_retries)
+    # REQ-ATO-021: WoL 송신 결과 단계 전이 로그.
+    _logger.info(
+        "wol send result success=%s run_id=%s",
+        wol_result.success,
+        run_id,
+        extra={"stage_marker": True},
+    )
     if not wol_result.success:
         failure = TrainingRunFailure(
             stage="wol", message=wol_result.error or "WoL 매직패킷 송신 실패", run_id=run_id
@@ -123,6 +130,13 @@ def execute_scheduled_training_run(
 
     timeout_seconds = (
         config.weekly_timeout_seconds if run_kind == "weekly" else config.monthly_timeout_seconds
+    )
+    # REQ-ATO-021: 디스패치 시작(run_id + 타임아웃값) 단계 전이 로그.
+    _logger.info(
+        "dispatch start run_id=%s timeout_seconds=%s",
+        run_id,
+        timeout_seconds,
+        extra={"stage_marker": True},
     )
     staging_path = config.staging_models_root / run_id
     command = build_remote_dispatch_command(
@@ -151,6 +165,14 @@ def execute_scheduled_training_run(
             timeout_seconds=timeout_seconds,
             on_output_line=_make_stage_marker_relay(_logger),
         )
+        # REQ-ATO-021: 원격 종료코드 수신 단계 전이 로그.
+        _logger.info(
+            "remote exit code received exit_code=%s timed_out=%s run_id=%s",
+            result.exit_code,
+            result.timed_out,
+            run_id,
+            extra={"stage_marker": True},
+        )
 
         if result.timed_out:
             failure = TrainingRunFailure(
@@ -171,10 +193,15 @@ def execute_scheduled_training_run(
         # plan.md §B.5(D6): 이 지점에 도달했다는 것 자체가 SSH 종료코드 0을
         # 의미한다 — 프로모션은 오직 이 성공 경로에서만 호출된다.
         promoted = promote_staging_to_active(connection, staging_path, config.active_models_root)
+        # REQ-ATO-021: 프로모션 결과 단계 전이 로그.
+        _logger.info(
+            "promotion result promoted=%s run_id=%s", promoted, run_id, extra={"stage_marker": True}
+        )
         metrics.record_success(
             market=market, horizon=horizon, algorithm=algorithm, timestamp=time_fn()
         )
         return RunOutcome(success=True, promoted=promoted)
+
     finally:
         # REQ-ATA-032/AC-ATA-006: 성공·실패·타임아웃 무관 SSH 세션을 정리한다.
         # db_tunnel 자체의 해제는 원격 셸 스크립트의 trap이 담당한다

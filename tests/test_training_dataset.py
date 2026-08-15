@@ -248,5 +248,66 @@ class TestAssembleDatasetSupplyDemand:
         assert "label_D60" in result.columns
 
 
+class TestProgressBatchLogging:
+    """AC-ATO-009(REQ-ATO-016): 25종목마다 1회 진행 로그를 남기며, 각 로그는
+    해당 배치의 종목코드를 나열한다."""
+
+    def test_sixty_two_stocks_emit_three_batches(self, caplog: pytest.LogCaptureFixture):
+        calendar = _calendar(date(2005, 1, 1), date(2005, 3, 1))
+        dates = _weekdays(date(2005, 1, 3), date(2005, 2, 1))
+        stock_codes = [f"A{i:03d}" for i in range(62)]
+        stocks = pd.DataFrame(
+            {"stock_code": stock_codes, "grade": ["A"] * 62, "delisted_at": [None] * 62}
+        )
+        ohlcv_by_stock = {code: _ohlcv(code, dates) for code in stock_codes}
+        events_by_stock = {code: _empty_events() for code in stock_codes}
+
+        with caplog.at_level("INFO"):
+            assemble_dataset(
+                stocks=stocks,
+                ohlcv_by_stock=ohlcv_by_stock,
+                events_by_stock=events_by_stock,
+                investor_trend_by_stock={},
+                calendar=calendar,
+                market="domestic",
+            )
+
+        progress_records = [r for r in caplog.records if "dataset assembly progress" in r.message]
+        assert len(progress_records) == 3
+        assert "A000" in progress_records[0].getMessage()
+        assert "A024" in progress_records[0].getMessage()
+        assert "A025" in progress_records[1].getMessage()
+        assert "A049" in progress_records[1].getMessage()
+        assert "A050" in progress_records[2].getMessage()
+        assert "A061" in progress_records[2].getMessage()
+
+    def test_exact_multiple_of_batch_size_has_no_trailing_empty_log(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """경계값: 정확히 50종목(25의 배수)이면 마지막 배치가 0건짜리 빈 로그를
+        남기지 않는다."""
+        calendar = _calendar(date(2005, 1, 1), date(2005, 3, 1))
+        dates = _weekdays(date(2005, 1, 3), date(2005, 2, 1))
+        stock_codes = [f"B{i:03d}" for i in range(50)]
+        stocks = pd.DataFrame(
+            {"stock_code": stock_codes, "grade": ["A"] * 50, "delisted_at": [None] * 50}
+        )
+        ohlcv_by_stock = {code: _ohlcv(code, dates) for code in stock_codes}
+        events_by_stock = {code: _empty_events() for code in stock_codes}
+
+        with caplog.at_level("INFO"):
+            assemble_dataset(
+                stocks=stocks,
+                ohlcv_by_stock=ohlcv_by_stock,
+                events_by_stock=events_by_stock,
+                investor_trend_by_stock={},
+                calendar=calendar,
+                market="domestic",
+            )
+
+        progress_records = [r for r in caplog.records if "dataset assembly progress" in r.message]
+        assert len(progress_records) == 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

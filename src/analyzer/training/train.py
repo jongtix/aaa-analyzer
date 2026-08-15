@@ -41,6 +41,7 @@ import pandas as pd
 from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Engine
 
+from analyzer.common.logging import get_logger
 from analyzer.common.trace import set_trace_id
 from analyzer.data.models import TradingCalendar
 from analyzer.data.repository import (
@@ -54,6 +55,13 @@ from analyzer.training import dataset as dataset_module
 from analyzer.training import persistence as persistence_module
 from analyzer.training.db import build_trainer_engine
 from analyzer.training.models import HORIZONS, MARKETS, train_pooled_models
+
+logger = get_logger(__name__)
+
+_PROGRESS_BATCH_SIZE = 25
+"""SPEC-ANALYZER-TRAIN-OBSV-001 REQ-ATO-015: 25종목마다 1회 진행 로그를
+남긴다 — 사용자가 확정한 값이므로 코드 상수로 고정한다."""
+
 
 _MARKET_TO_STOCKS_MARKET_CODES: dict[str, tuple[str, ...]] = {
     "domestic": ("KOSPI", "KOSDAQ"),
@@ -109,10 +117,20 @@ def fetch_market_data(
     events_by_stock: dict[str, pd.DataFrame] = {}
     investor_trend_by_stock: dict[str, pd.DataFrame] = {}
 
+    progress_batch: list[str] = []
     for stock_code in stocks["stock_code"]:
         ohlcv_by_stock[stock_code] = fetch_daily_ohlcv(engine, stock_code)
         events_by_stock[stock_code] = fetch_corporate_events(engine, stock_code)
         investor_trend_by_stock[stock_code] = fetch_investor_trend(engine, stock_code)
+
+        progress_batch.append(stock_code)
+        if len(progress_batch) >= _PROGRESS_BATCH_SIZE:
+            # REQ-ATO-015: 25종목마다 1회 진행 로그(해당 배치 종목코드 나열).
+            logger.info("market data fetch progress batch=%s", progress_batch)
+            progress_batch = []
+
+    if progress_batch:
+        logger.info("market data fetch progress batch=%s", progress_batch)
 
     return ohlcv_by_stock, events_by_stock, investor_trend_by_stock
 
@@ -127,6 +145,15 @@ def _assemble_market_dataset(
 ) -> pd.DataFrame:
     """단일 시장의 데이터셋을 조회+조립하고 캐시를 경유한다(`db.py`→`dataset.py`→`cache.py`)."""
     stocks = fetch_stock_universe(engine, market)
+    grade_counts = stocks["grade"].value_counts().to_dict() if not stocks.empty else {}
+    # REQ-ATO-018: 시장별 시작 + 유니버스 크기(등급별 종목 수) 단계 전이 로그.
+    logger.info(
+        "market start market=%s universe_size=%d grade_counts=%s",
+        market,
+        len(stocks),
+        grade_counts,
+        extra={"stage_marker": True},
+    )
     ohlcv_by_stock, events_by_stock, investor_trend_by_stock = fetch_market_data(engine, stocks)
 
     def _assemble() -> pd.DataFrame:
@@ -139,13 +166,34 @@ def _assemble_market_dataset(
             market=market,
         )
 
-    return cache_module.assemble_dataset_cached(
+    # REQ-ATO-018: 데이터셋 캐시 히트/미스 단계 전이 로그. 실제 캐시 사용은
+    # 여전히 assemble_dataset_cached()가 전담한다 — 여기서는 관측 목적으로만
+    # 존재 여부를 한 번 더 확인한다(cache.py 내부 구현/시그니처는 건드리지 않음).
+    cache_hit = (
+        cache_module.load_cached_dataset(cache_dir, market, data_as_of, feature_code_version)
+        is not None
+    )
+    logger.info(
+        "dataset cache %s market=%s",
+        "hit" if cache_hit else "miss",
+        market,
+        extra={"stage_marker": True},
+    )
+    assembled = cache_module.assemble_dataset_cached(
         cache_dir=cache_dir,
         market=market,
         data_as_of=data_as_of,
         feature_code_version=feature_code_version,
         assemble_fn=_assemble,
     )
+    # REQ-ATO-018: 데이터셋 조립 완료 행수 단계 전이 로그.
+    logger.info(
+        "dataset assembly complete market=%s rows=%d",
+        market,
+        len(assembled),
+        extra={"stage_marker": True},
+    )
+    return assembled
 
 
 def _split_features_and_labels(
@@ -211,6 +259,14 @@ def run_training_pipeline(
             )
             for horizon in HORIZONS:
                 _feature_columns, x, y = _split_features_and_labels(assembled, horizon)
+                # REQ-ATO-018: horizon별 유효 레이블 행수 단계 전이 로그.
+                logger.info(
+                    "valid label rows market=%s horizon=%s rows=%d",
+                    market,
+                    horizon,
+                    len(x),
+                    extra={"stage_marker": True},
+                )
                 data_by_combo[(market, horizon)] = (x.to_numpy(), y.to_numpy())
 
         trained_models = train_pooled_models(
@@ -224,10 +280,22 @@ def run_training_pipeline(
             saved = persistence_module.save_model_native(
                 model, models_root, market, horizon, algorithm, data_as_of
             )
+            # REQ-ATO-019: 모델 저장 경로 단계 전이 로그.
+            logger.info(
+                "model saved market=%s horizon=%s algorithm=%s path=%s",
+                market,
+                horizon,
+                algorithm,
+                saved.model_path,
+                extra={"stage_marker": True},
+            )
             saved_paths.append(saved.model_path)
 
         return TrainingPipelineResult(success=True, saved_model_paths=saved_paths)
     except Exception as exc:  # noqa: BLE001 — 오케스트레이터 최상위 캐치-올(종료코드 신호 계약)
+        # REQ-ATO-020: TrainingPipelineResult.error 반환 타입(문자열)은 그대로
+        # 유지하되, 전체 traceback은 로그로 남긴다(exc_info=True).
+        logger.error("training pipeline failed: %s", exc, exc_info=True)
         return TrainingPipelineResult(success=False, error=str(exc))
 
 

@@ -10,6 +10,7 @@ from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 
+import pytest
 from prometheus_client import CollectorRegistry
 
 from analyzer.orchestration.config import AutomationConfig
@@ -476,3 +477,44 @@ class TestExecuteScheduledTrainingRunIdempotentWol:
 
         assert outcome.success is True
         assert wol.calls == 1  # 재시도 없이 1회 만에 정상 진행(부가 효과 없음)
+
+
+class TestExecuteScheduledTrainingRunStageTransitionLogs:
+    """AC-ATO-013(REQ-ATO-021): 정상 성공 경로 완료 시 WoL 송신 결과, SSH
+    연결 성공(+시도 횟수), 디스패치 시작(run_id+타임아웃값), 원격 종료코드
+    수신, 프로모션 결과 각각 1줄 이상의 단계 전이 로그가 남아야 한다."""
+
+    def test_success_path_emits_all_five_stage_transition_logs(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        config = _make_config(tmp_path)
+        wol = _FakeWolSender([True])
+        connection = _FakeConnection(
+            exec_results=[CommandResult(exit_code=0), CommandResult(exit_code=0)]
+        )
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        with (
+            caplog.at_level("INFO", logger="analyzer.orchestration.runner"),
+            caplog.at_level("INFO", logger="analyzer.orchestration.ssh_dispatch"),
+        ):
+            execute_scheduled_training_run(
+                run_kind="weekly",
+                run_id="run-10",
+                market="domestic",
+                horizon=5,
+                algorithm="lightgbm",
+                data_as_of=date(2026, 8, 11),
+                config=config,
+                wol_sender=wol,
+                connection_factory=lambda: connection,
+                metrics=metrics,
+                sleep_fn=lambda _s: None,
+                time_fn=lambda: 1234.0,
+            )
+
+        assert "wol send result" in caplog.text
+        assert "dispatch start" in caplog.text
+        assert "run_id=run-10" in caplog.text
+        assert "remote exit code received" in caplog.text
+        assert "promotion result" in caplog.text

@@ -12,6 +12,7 @@ SPEC-ANALYZER-TRAIN-001 M1(REQ-AT-020/022/023/025): `assemble_dataset()`이
 전달한다(`compute_labels()`의 순수 함수 설계 원칙을 그대로 계승).
 """
 
+import logging
 from collections.abc import Mapping
 
 import pandas as pd
@@ -47,6 +48,12 @@ _EMPTY_EVENTS_COLUMNS = [
     "ex_dividend_date",
     "currency_code",
 ]
+
+logger = logging.getLogger(__name__)
+
+_PROGRESS_BATCH_SIZE = 25
+"""SPEC-ANALYZER-TRAIN-OBSV-001 REQ-ATO-016: 25종목마다 1회 진행 로그를
+남긴다 — 사용자가 확정한 값이므로 코드 상수로 고정한다."""
 
 _ASSEMBLED_DATASET_COLUMNS = [
     "stock_code",
@@ -130,9 +137,17 @@ def assemble_dataset(
     universe = stocks.loc[stocks["grade"].isin(["A", "B"])]
 
     assembled: list[pd.DataFrame] = []
+    progress_batch: list[str] = []
     for row in universe.itertuples():
         stock_code = row.stock_code
+        progress_batch.append(stock_code)
+        if len(progress_batch) >= _PROGRESS_BATCH_SIZE:
+            # REQ-ATO-016: 25종목마다 1회 진행 로그(해당 배치 종목코드 나열).
+            logger.info("dataset assembly progress batch=%s", progress_batch)
+            progress_batch = []
+
         raw = ohlcv_by_stock.get(stock_code)
+
         if raw is None or raw.empty:
             continue
 
@@ -165,6 +180,9 @@ def assemble_dataset(
             labeled[["trade_date", *label_columns]], on="trade_date", how="left"
         )
         assembled.append(merged)
+
+    if progress_batch:
+        logger.info("dataset assembly progress batch=%s", progress_batch)
 
     if not assembled:
         return pd.DataFrame(columns=_ASSEMBLED_DATASET_COLUMNS)
