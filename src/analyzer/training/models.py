@@ -43,8 +43,18 @@ QUANTILE_ALPHAS: tuple[float, ...] = (0.10, 0.90)
 PooledModel = lgb.LGBMRegressor | xgb.XGBRegressor
 """이 모듈이 반환하는 학습된 모델의 타입(포인트/분위수 보조 공통)."""
 
-_DEFAULT_LGBM_PARAMS: dict[str, Any] = {"verbosity": -1}
-_DEFAULT_XGB_PARAMS: dict[str, Any] = {"verbosity": 0}
+# SPEC-ANALYZER-TRAIN-OBSV-001 REQ-ATO-023/024: 완전 무음(-1/0)에서 낮춘
+# verbosity로 변경한다 — LightGBM은 Error/Warning 레벨(0), XGBoost는
+# warning 레벨(1)까지 노출하고, LightGBM은 register_logger()로 네이티브
+# 로그를 analyzer 구조화 로거로 라우팅한다(아래). XGBoost는 대응하는
+# 공식 로거 라우팅 API가 없어(2026-08 기준) 원격 셸 리다이렉션(2>&1)으로
+# 트레이너 파일에 합류시킨다(REQ-ATO-025, ssh_dispatch.build_remote_dispatch_command).
+_DEFAULT_LGBM_PARAMS: dict[str, Any] = {"verbosity": 0}
+_DEFAULT_XGB_PARAMS: dict[str, Any] = {"verbosity": 1}
+
+lgb.register_logger(logger)
+"""REQ-ATO-023: LightGBM 네이티브 로그 콜백을 analyzer 구조화 로거의
+info()/warning() 메서드로 라우팅한다."""
 
 
 def train_pooled_models(

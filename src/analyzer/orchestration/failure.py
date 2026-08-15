@@ -20,13 +20,16 @@ vmalert 경로를 재사용한다(REQ-ATA-012) — 이 경로는 §2.7이 발행
 경로는 로그+계측 책임만 진다.
 """
 
-import logging
 from dataclasses import dataclass
 from typing import Literal
 
+from analyzer.common.logging import get_logger
 from analyzer.orchestration.metrics import TrainingMetrics
 
-logger = logging.getLogger(__name__)
+# SPEC-ANALYZER-TRAIN-OBSV-001 REQ-ATO-022: raw 표준 로거 대신 기존 구조화
+# JSON 로거를 사용해 평문 stderr 유출을 제거한다.
+logger = get_logger(__name__)
+
 
 FailureStage = Literal["wol", "ssh", "training", "timeout"]
 """REQ-ATA-060이 열거하는 4가지 실패 유형 — 이 집합 밖의 값은 타입 체커가 거부한다."""

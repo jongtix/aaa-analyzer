@@ -204,3 +204,37 @@ class TestNativeEarlyStopping:
         quantile_model = models[("domestic", 20, "lightgbm_quantile", 0.10)]
         assert isinstance(quantile_model, LGBMRegressor)
         assert quantile_model.best_iteration_ < 500
+
+
+class TestFrameworkVerbosityAndLoggerRouting:
+    """AC-ATO-015/016(REQ-ATO-023/024): LightGBM verbosity=0, XGBoost
+    verbosity=1(기존 -1/0에서 변경) + LightGBM 네이티브 로거 라우팅."""
+
+    def test_default_lgbm_verbosity_is_zero(self):
+        from analyzer.training.models import _DEFAULT_LGBM_PARAMS
+
+        assert _DEFAULT_LGBM_PARAMS["verbosity"] == 0
+
+    def test_default_xgb_verbosity_is_one(self):
+        from analyzer.training.models import _DEFAULT_XGB_PARAMS
+
+        assert _DEFAULT_XGB_PARAMS["verbosity"] == 1
+
+    def test_lightgbm_native_logger_is_registered_to_analyzer_logger(self):
+        """REQ-ATO-023: LightGBM 네이티브 로그 출력이 analyzer 구조화 로거로
+        라우팅되도록 register_logger()가 배선되어 있어야 한다."""
+        import lightgbm as lgb
+
+        from analyzer.training import models as models_module
+
+        captured: list[str] = []
+        original_logger = models_module.logger
+        try:
+            models_module.logger.info = captured.append  # type: ignore[method-assign]
+            lgb.register_logger(models_module.logger)
+            lgb.basic._log_info("test lightgbm native log message")
+        finally:
+            models_module.logger.info = original_logger.info  # type: ignore[method-assign]
+            lgb.register_logger(models_module.logger)
+
+        assert any("test lightgbm native log message" in msg for msg in captured)

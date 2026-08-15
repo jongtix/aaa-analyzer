@@ -10,6 +10,8 @@ import logging
 import pytest
 from prometheus_client import CollectorRegistry
 
+from analyzer.common.logging import JsonFormatter
+from analyzer.orchestration import failure as failure_module
 from analyzer.orchestration.failure import TrainingRunFailure, handle_training_run_failure
 from analyzer.orchestration.metrics import TRAINING_RUN_TOTAL_NAME, TrainingMetrics
 
@@ -46,6 +48,11 @@ class TestHandleTrainingRunFailure:
         assert any(
             "ssh" in record.message and "run-42" in record.message for record in caplog.records
         )
+
+    def test_uses_structured_json_logger_not_raw_stdlib_logger(self):
+        """AC-ATO-014(REQ-ATO-022): raw 표준 로거가 아니라 기존 구조화 JSON
+        로거(get_logger())를 사용해야 한다 — 평문 stderr 유출을 제거한다."""
+        assert isinstance(failure_module.logger.handlers[0].formatter, JsonFormatter)
 
     def test_records_prometheus_failure_metric(self):
         registry = CollectorRegistry()
