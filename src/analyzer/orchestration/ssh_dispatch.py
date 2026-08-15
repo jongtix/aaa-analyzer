@@ -323,6 +323,7 @@ def build_remote_dispatch_command(
     quoted_python_executable_path = shlex.quote(str(python_executable_path))
     quoted_mysql_database = shlex.quote(mysql_database)
     quoted_mysql_trainer_password = shlex.quote(mysql_trainer_password)
+    quoted_run_id = shlex.quote(run_id)
     trainer_log_path = trainer_log_base_dir / f"trainer_{run_id}.log"
     quoted_trainer_log_path = shlex.quote(str(trainer_log_path))
 
@@ -338,6 +339,10 @@ def build_remote_dispatch_command(
         f"MYSQL_HOST=127.0.0.1 MYSQL_PORT={db_tunnel_local_port} "
         f"MYSQL_DATABASE={quoted_mysql_database} "
         f"MYSQL_TRAINER_PASSWORD={quoted_mysql_trainer_password} "
+        # REQ-ATO-012/013: NAS에서 발급된 run_id를 원격 CLI로 전달한다 —
+        # train.py main()이 이 값을 기존 trace_id 발급/전파 유틸리티(set_trace_id())로
+        # 즉시 설정해 릴레이 로그·트레이너 파일 로그 양쪽의 trace_id 필드에 반영한다.
+        f"TRAIN_RUN_ID={quoted_run_id} "
         f"{quoted_python_executable_path} -m analyzer.training.train "
         f"--calendar-code {quoted_calendar_code} "
         f"--cache-dir {quoted_cache_dir} "

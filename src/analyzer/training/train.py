@@ -29,6 +29,7 @@ SPEC의 PRESERVE 대상(plan.md §D, `_DB_USER`→`_ANALYZER_DB_USER` 리네임
 """
 
 import argparse
+import os
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ import pandas as pd
 from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Engine
 
+from analyzer.common.trace import set_trace_id
 from analyzer.data.models import TradingCalendar
 from analyzer.data.repository import (
     fetch_corporate_events,
@@ -239,7 +241,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--feature-code-version", required=True)
     args = parser.parse_args(argv)
 
+    # REQ-ATO-012/013/014: NAS 오케스트레이터가 전달한 run_id를 trace_id로
+    # 즉시 설정한다 — 누락되어도(fail-open) 학습 자체는 계속 진행된다
+    # (get_trace_id()가 None을 반환하는 기존 계약과 정합, REQ-ATO-014 참조).
+    run_id = os.environ.get("TRAIN_RUN_ID")
+    if run_id:
+        set_trace_id(run_id)
+
     engine = build_trainer_engine()
+
     result = run_training_pipeline(
         trainer_engine=engine,
         calendar_code=args.calendar_code,

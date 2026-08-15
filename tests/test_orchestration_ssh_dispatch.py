@@ -382,7 +382,10 @@ class TestBuildRemoteDispatchCommand:
         assert "MYSQL_HOST=127.0.0.1 MYSQL_PORT=13306" in command
         assert "MYSQL_DATABASE=aaa" in command
         assert "MYSQL_TRAINER_PASSWORD=trainer-secret" in command
-        assert "MYSQL_TRAINER_PASSWORD=trainer-secret /python -m analyzer.training.train" in command
+        assert (
+            "MYSQL_TRAINER_PASSWORD=trainer-secret TRAIN_RUN_ID=run-6 "
+            "/python -m analyzer.training.train"
+        ) in command
 
     def test_mysql_trainer_password_is_shlex_quoted(self):
         command = build_remote_dispatch_command(
@@ -620,6 +623,50 @@ class TestBuildRemoteDispatchCommand:
         )
 
         assert shlex.quote("/logs dir/analyzer/trainer_run-16.log") in command
+
+    def test_includes_train_run_id_env_var(self):
+        """AC-ATO-008(REQ-ATO-012/013): NAS에서 발급된 run_id가 원격 CLI로
+        TRAIN_RUN_ID env var로 전달되어야 한다."""
+        command = build_remote_dispatch_command(
+            staging_models_root=Path("/staging/run-1"),
+            calendar_code="KRX",
+            cache_dir=Path("/cache"),
+            data_as_of=date(2026, 8, 11),
+            feature_code_version="v1",
+            db_tunnel_host="nas-host",
+            db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-xyz789",
+        )
+
+        assert "TRAIN_RUN_ID=run-xyz789" in command
+
+    def test_train_run_id_is_shlex_quoted(self):
+        """REQ-ATO-014: run_id 전파는 기존 안전한 셸 조립 관례(shlex.quote)를
+        그대로 따라야 한다 — 값에 셸 메타문자가 포함돼도 안전하게 전달된다."""
+        malicious_run_id = "run; touch /tmp/pwned"
+        command = build_remote_dispatch_command(
+            staging_models_root=Path("/staging/run-1"),
+            calendar_code="KRX",
+            cache_dir=Path("/cache"),
+            data_as_of=date(2026, 8, 11),
+            feature_code_version="v1",
+            db_tunnel_host="nas-host",
+            db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id=malicious_run_id,
+        )
+
+        assert shlex.quote(malicious_run_id) in command
+        assert f"TRAIN_RUN_ID={malicious_run_id} " not in command
 
 
 class TestPromoteStagingToActive:

@@ -250,5 +250,67 @@ class TestMainCliExitCode:
             )
 
         assert exit_code == 1
+
         captured = capsys.readouterr()
         assert "테스트 실패" in captured.err
+
+
+class TestMainTraceIdPropagation:
+    """AC-ATO-008(REQ-ATO-012/013/014): TRAIN_RUN_ID env var가 있으면
+    trace_id로 즉시 설정되어야 한다 — 없으면(fail-open) 그대로 진행된다."""
+
+    def test_sets_trace_id_from_train_run_id_env_var(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from analyzer.common.trace import get_trace_id
+
+        monkeypatch.setenv("TRAIN_RUN_ID", "run-xyz789")
+        with (
+            patch.object(train_module, "build_trainer_engine", return_value=MagicMock()),
+            patch.object(
+                train_module,
+                "run_training_pipeline",
+                return_value=TrainingPipelineResult(success=True, saved_model_paths=[]),
+            ),
+        ):
+            main(
+                [
+                    "--cache-dir",
+                    str(tmp_path / "cache"),
+                    "--models-root",
+                    str(tmp_path / "models"),
+                    "--data-as-of",
+                    "2026-08-08",
+                    "--feature-code-version",
+                    "v1",
+                ]
+            )
+
+        assert get_trace_id() == "run-xyz789"
+
+    def test_missing_train_run_id_does_not_fail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.delenv("TRAIN_RUN_ID", raising=False)
+        with (
+            patch.object(train_module, "build_trainer_engine", return_value=MagicMock()),
+            patch.object(
+                train_module,
+                "run_training_pipeline",
+                return_value=TrainingPipelineResult(success=True, saved_model_paths=[]),
+            ),
+        ):
+            exit_code = main(
+                [
+                    "--cache-dir",
+                    str(tmp_path / "cache"),
+                    "--models-root",
+                    str(tmp_path / "models"),
+                    "--data-as-of",
+                    "2026-08-08",
+                    "--feature-code-version",
+                    "v1",
+                ]
+            )
+
+        assert exit_code == 0
