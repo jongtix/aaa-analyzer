@@ -8,6 +8,7 @@ REQ-ATA-020/021/022/030/031/032/040/041/050/051, AC-ATA-001/003/006/009/011.
 """
 
 import shlex
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -26,14 +27,31 @@ from analyzer.orchestration.ssh_dispatch import (
 )
 
 
-def _make_connection_with_mocked_client(tmp_path: Path) -> ParamikoSshConnection:
+def _no_sleep(_seconds: float) -> None:
+    """시간이 흐르는 것처럼 보이게만 하고 실제로 대기하지 않는 테스트용 sleep_fn."""
+
+
+def _make_connection_with_mocked_client(
+    tmp_path: Path,
+    *,
+    time_fn: Callable[[], float] | None = None,
+    sleep_fn: Callable[[float], None] = _no_sleep,
+) -> ParamikoSshConnection:
     """`self._client`를 `MagicMock()`으로 교체해 실 네트워크 없이 I/O 메서드를
-    검증하기 위한 헬퍼(초기화 자체는 실 `paramiko.SSHClient()`로 수행)."""
+    검증하기 위한 헬퍼(초기화 자체는 실 `paramiko.SSHClient()`로 수행).
+
+    `time_fn`/`sleep_fn`은 REQ-ATO-009 자체 데드라인 추적 폴링 루프를 실제
+    대기 없이 결정론적으로 테스트하기 위한 주입 지점이다(기본값은 실제
+    `time.monotonic`을 그대로 쓰되 `sleep_fn`만 무동작으로 대체한다)."""
     key_path = tmp_path / "id_ed25519"
     key_path.write_text("fake-key-material")
     key_path.chmod(0o600)
     known_hosts_path = tmp_path / "known_hosts"
     known_hosts_path.write_text("")
+
+    kwargs: dict = {}
+    if time_fn is not None:
+        kwargs["time_fn"] = time_fn
 
     connection = ParamikoSshConnection(
         host="macbook.local",
@@ -41,6 +59,8 @@ def _make_connection_with_mocked_client(tmp_path: Path) -> ParamikoSshConnection
         username="dispatch",
         private_key_path=key_path,
         known_hosts_path=known_hosts_path,
+        sleep_fn=sleep_fn,
+        **kwargs,
     )
     connection._client = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
     return connection
@@ -67,7 +87,13 @@ class _FakeSshConnection:
             self._connect_failures_remaining -= 1
             raise ConnectionError("SSH 연결 실패(페이크)")
 
-    def exec_command(self, command: str, timeout_seconds: float) -> CommandResult:
+    def exec_command(
+        self,
+        command: str,
+        timeout_seconds: float,
+        *,
+        on_output_line: Callable[[str], None] | None = None,
+    ) -> CommandResult:
         self.executed_commands.append((command, timeout_seconds))
         if self._command_results:
             return self._command_results.pop(0)
@@ -594,9 +620,15 @@ class TestParamikoSshConnectionMockedIO:
         assert kwargs["timeout"] == 5.0
 
     def test_exec_command_returns_exit_code_from_channel(self, tmp_path: Path):
+        """D1(계층 B, 의도적 갱신) — 신규 폴링 드레인 루프에 맞춰 mock 설정을
+        갱신한다: recv_ready/recv_stderr_ready는 출력 없음(False), exit_status_ready는
+        즉시 True로 종료코드 획득 경로만으로 완료를 판정하게 한다."""
         connection = _make_connection_with_mocked_client(tmp_path)
         mock_transport = MagicMock()
         mock_channel = MagicMock()
+        mock_channel.recv_ready.return_value = False
+        mock_channel.recv_stderr_ready.return_value = False
+        mock_channel.exit_status_ready.return_value = True
         mock_channel.recv_exit_status.return_value = 0
         mock_transport.open_session.return_value = mock_channel
         connection._client.get_transport.return_value = mock_transport  # pyright: ignore[reportAttributeAccessIssue]
@@ -604,14 +636,32 @@ class TestParamikoSshConnectionMockedIO:
         result = connection.exec_command("echo hi", timeout_seconds=5.0)
 
         assert result == CommandResult(exit_code=0)
-        mock_channel.settimeout.assert_called_once_with(5.0)
+        # REQ-ATO-010: settimeout()은 더 이상 timeout_seconds를 그대로 넘기지
+        # 않는다 — recv_exit_status()가 settimeout 값을 준수하지 않으므로,
+        # 타임아웃 강제는 이 메서드 자체의 데드라인 추적이 전담한다(0.0은
+        # recv()/recv_stderr() 논블로킹 폴링 전용 설정).
+        mock_channel.settimeout.assert_called_once_with(0.0)
         mock_channel.exec_command.assert_called_once_with("echo hi")
 
     def test_exec_command_returns_timed_out_result_on_timeout(self, tmp_path: Path):
-        connection = _make_connection_with_mocked_client(tmp_path)
+        """D1(계층 B, 의도적 갱신) — 원격 프로세스 종료코드 대기 API(exit_status_ready)가
+        영구히 False를 반환하도록(REQ-ATA-041 결함 실측 재현) 시뮬레이션해도,
+        읽기 루프 자체의 자체 데드라인 추적이 타임아웃을 강제해야 한다(REQ-ATO-009)."""
+        call_count = 0
+
+        def _incrementing_clock() -> float:
+            nonlocal call_count
+            call_count += 1
+            # 첫 호출(데드라인 계산)은 0, 이후 호출은 데드라인을 항상 초과하도록
+            # 큰 폭으로 증가시켜 실제 대기 없이 결정론적으로 타임아웃을 유발한다.
+            return 0.0 if call_count == 1 else 1_000_000.0
+
+        connection = _make_connection_with_mocked_client(tmp_path, time_fn=_incrementing_clock)
         mock_transport = MagicMock()
         mock_channel = MagicMock()
-        mock_channel.recv_exit_status.side_effect = TimeoutError()
+        mock_channel.recv_ready.return_value = False
+        mock_channel.recv_stderr_ready.return_value = False
+        mock_channel.exit_status_ready.return_value = False
         mock_transport.open_session.return_value = mock_channel
         connection._client.get_transport.return_value = mock_transport  # pyright: ignore[reportAttributeAccessIssue]
 
@@ -633,6 +683,143 @@ class TestParamikoSshConnectionMockedIO:
         connection.close()
 
         connection._client.close.assert_called_once()  # pyright: ignore[reportAttributeAccessIssue]
+
+
+class BufferOverflowError(RuntimeError):
+    """테스트 전용 — 채널 버퍼 포화를 결정론적으로 시뮬레이션한다(AC-ATO-001/002).
+
+    실제 OS 레벨 write() 블로킹을 재현하지 않고도(테스트가 무한정 멈추는 것을
+    피하면서) "소비되지 않았다면 블로킹했을 것"이라는 조건을 결정론적으로
+    검증하기 위한 acceptance.md AC-ATO-001 명시 설계다.
+    """
+
+
+class _FakeBufferedChannelConnection:
+    """채널 버퍼를 유한 용량 큐로 시뮬레이션하는 `SshConnection` 페이크.
+
+    `exec_command()`가 `on_output_line` 콜백을 받으면 라인마다 즉시 "소비"한
+    것으로 간주해 점유량을 즉시 되돌린다 — 신규 읽기 루프가 라인 단위로
+    지속 드레인하는 것과 동등한 소비 모델이다(AC-ATO-001). 콜백이 `None`이면
+    소비가 전혀 일어나지 않아, 읽기 루프가 없던 구현 이전 경로와 동등하게
+    버퍼가 무한정 쌓여 용량 초과 시 `BufferOverflowError`를 던진다(AC-ATO-002).
+    """
+
+    def __init__(self, *, buffer_capacity: int, remote_lines: list[str]) -> None:
+        self._buffer_capacity = buffer_capacity
+        self._remote_lines = list(remote_lines)
+        self.max_concurrent_unconsumed = 0
+
+    def connect(self) -> None:
+        pass
+
+    def exec_command(
+        self,
+        command: str,
+        timeout_seconds: float,
+        *,
+        on_output_line=None,
+    ) -> CommandResult:
+        occupancy = 0
+        for line in self._remote_lines:
+            occupancy += 1
+            self.max_concurrent_unconsumed = max(self.max_concurrent_unconsumed, occupancy)
+            if occupancy > self._buffer_capacity:
+                raise BufferOverflowError(
+                    f"채널 버퍼 용량({self._buffer_capacity}) 초과 — 소비되지 않은 라인이 누적됐다"
+                )
+            if on_output_line is not None:
+                on_output_line(line)
+                occupancy -= 1
+        return CommandResult(exit_code=0)
+
+    def close(self) -> None:
+        pass
+
+
+class TestChannelBufferSaturationPrevention:
+    """AC-ATO-001/002(REQ-ATO-001): 읽기 루프가 라인마다 즉시 소비하면 채널
+    버퍼가 사전 정의된 용량을 초과하지 않고, 소비가 없으면(구현 이전과 동등한
+    경로) 결함이 실제로 재현된다."""
+
+    def test_draining_callback_prevents_buffer_overflow(self):
+        """AC-ATO-001: 콜백(드레인)이 있으면 10,000라인 전체가 예외 없이
+        처리되고, 최대 동시 미소비 라인 수가 버퍼 용량을 초과하지 않는다."""
+        connection = _FakeBufferedChannelConnection(
+            buffer_capacity=10, remote_lines=[f"line-{i}" for i in range(10_000)]
+        )
+        consumed: list[str] = []
+
+        result = connection.exec_command("cmd", timeout_seconds=5.0, on_output_line=consumed.append)
+
+        assert result == CommandResult(exit_code=0)
+        assert len(consumed) == 10_000
+        assert connection.max_concurrent_unconsumed <= 10
+
+    def test_characterization_regression_without_drain_reproduces_defect(self):
+        """AC-ATO-002(D3): 읽기 루프가 없는(구현 이전과 동등한) 경로 — 콜백을
+        전달하지 않으면 채널 버퍼 용량 초과로 `BufferOverflowError`가 발생해야
+        한다. 이 특성화 회귀 테스트는 이번 결함이 실제로 재현 가능했음을
+        구조적으로 증명하며, 향후 읽기 루프가 실수로 제거되면 즉시 실패해야
+        한다(테스트 스위트에 영구 보존)."""
+        connection = _FakeBufferedChannelConnection(
+            buffer_capacity=10, remote_lines=[f"line-{i}" for i in range(10_000)]
+        )
+
+        with pytest.raises(BufferOverflowError):
+            connection.exec_command("cmd", timeout_seconds=5.0)
+
+
+class TestReadLoopCompletionRequiresExitCodePath:
+    """AC-ATO-017 Worked example B(REQ-ATO-026, D7): 원격 스트림이 프로세스
+    종료 전에 먼저 닫혀도(EOF), 읽기 루프는 종료코드 대기 API가 실제로 값을
+    반환할 때까지 계속 대기한 뒤에만 완료를 판정해야 한다."""
+
+    def test_does_not_complete_on_stream_eof_before_exit_status_ready(self, tmp_path: Path):
+        connection = _make_connection_with_mocked_client(tmp_path)
+        mock_transport = MagicMock()
+        mock_channel = MagicMock()
+        # stdout/stderr는 즉시 닫힌 것처럼(EOF, recv_ready/recv_stderr_ready
+        # 계속 False) 시뮬레이션하고, exit_status_ready는 세 번째 폴링에서만
+        # True가 되도록 해 "스트림이 프로세스보다 먼저 닫히는" 실제 가능
+        # 시나리오(자식으로 fd 리다이렉트)를 모사한다.
+        mock_channel.recv_ready.return_value = False
+        mock_channel.recv_stderr_ready.return_value = False
+        ready_sequence = iter([False, False, True])
+        mock_channel.exit_status_ready.side_effect = lambda: next(ready_sequence)
+        mock_channel.recv_exit_status.return_value = 0
+        mock_transport.open_session.return_value = mock_channel
+        connection._client.get_transport.return_value = mock_transport  # pyright: ignore[reportAttributeAccessIssue]
+
+        result = connection.exec_command("cmd", timeout_seconds=5.0)
+
+        assert result == CommandResult(exit_code=0)
+        assert mock_channel.exit_status_ready.call_count == 3
+
+
+class TestChannelDrainPartialLineBuffering:
+    """acceptance.md §B 경계 사례: 라인 경계 없이 부분 라인만 수신한 경우,
+    버퍼링 후 다음 read에서 결합해 완전한 라인 단위로만 콜백을 호출해야 한다."""
+
+    def test_partial_line_is_buffered_until_newline_arrives(self, tmp_path: Path):
+        connection = _make_connection_with_mocked_client(tmp_path)
+        mock_transport = MagicMock()
+        mock_channel = MagicMock()
+        mock_channel.recv_stderr_ready.return_value = False
+        recv_ready_sequence = iter([True, True, False])
+        mock_channel.recv_ready.side_effect = lambda: next(recv_ready_sequence, False)
+        recv_chunks = iter([b"partial-", b"line\n"])
+        mock_channel.recv.side_effect = lambda _n: next(recv_chunks)
+        exit_ready_sequence = iter([False, False, True])
+        mock_channel.exit_status_ready.side_effect = lambda: next(exit_ready_sequence, True)
+        mock_channel.recv_exit_status.return_value = 0
+
+        mock_transport.open_session.return_value = mock_channel
+        connection._client.get_transport.return_value = mock_transport  # pyright: ignore[reportAttributeAccessIssue]
+        received_lines: list[str] = []
+
+        connection.exec_command("cmd", timeout_seconds=5.0, on_output_line=received_lines.append)
+
+        assert received_lines == ["partial-line"]
 
 
 class TestNoAlternativeCompletionSignalingMechanism:

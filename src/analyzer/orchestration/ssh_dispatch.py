@@ -26,6 +26,24 @@ analyzer(NAS)는 MacBook에 직접 로컬 포트포워딩을 열 수 없으므�
 
 REQ-ATA-051: 이 모듈은 SSH 종료코드 판정 외의 별도 완료 시그널링 메커니즘
 (콜백 엔드포인트, 폴링 완료 파일 등)을 도입하지 않는다.
+
+SPEC-ANALYZER-TRAIN-OBSV-001 §2.1/§2.3, REQ-ATO-001/003/009/010/011: `exec_command()`
+내부를 **모든** 호출에 보편 적용되는 폴링 드레인 루프로 재구현한다 — SSH 채널
+버퍼를 지속 소비해 원격 프로세스의 `write()` 블로킹(15시간 데드락 실측,
+2026-08-13~14)을 구조적으로 방지하고, 자체 `time.monotonic()` 데드라인 추적으로
+타임아웃을 강제한다.
+
+**REQ-ATO-010 실측 근거(근본 원인)**: `paramiko.Channel.recv_exit_status()`는
+`timeout` 인자를 받지 않는 시그니처이며(`channel.settimeout()`이 설정하는
+값은 `recv()`/`send()`류의 블로킹 I/O 타임아웃에만 적용된다), 내부적으로
+`self.status_event.wait()`를 **인자 없이** 호출한다 — 즉 `recv_exit_status()`
+자체는 `settimeout()`으로 설정한 타임아웃을 준수하지 않고 종료 이벤트가 발생할
+때까지 무기한 대기한다. 원격 프로세스가 `write()`에서 영구 블록하면 종료
+이벤트 자체가 결코 발생하지 않으므로, 기존 `try: channel.recv_exit_status()
+except TimeoutError` 경로는 이 경우 결코 도달하지 않는다 — 이것이 REQ-ATA-041
+타임아웃이 실측에서 발화하지 않은 근본 원인이다. 이 SPEC은 `recv_exit_status()`
+단독 호출 대신 `channel.exit_status_ready()`를 논블로킹 폴링하고 자체
+데드라인을 별도로 추적하는 방식으로 재설계해 이 결함을 우회한다.
 """
 
 import shlex
@@ -42,6 +60,11 @@ import paramiko
 _DEFAULT_CONNECT_TIMEOUT_SECONDS = 15.0
 """paramiko 기본값(None=무기한 블로킹)은 REQ-ATA-021의 10초×6회 재시도 설계를
 무력화한다 — 첫 시도가 멈추면 재시도 루프에 도달하지 못한다."""
+
+_DEFAULT_POLL_INTERVAL_SECONDS = 0.05
+"""REQ-ATO-001/009: 채널 드레인 + 자체 데드라인 추적 폴링 루프의 유휴 대기 간격."""
+
+_CHANNEL_READ_CHUNK_BYTES = 4096
 
 
 class SshKeyPermissionError(RuntimeError):
@@ -63,13 +86,26 @@ class SshConnection(Protocol):
         """연결을 수립한다. 실패 시 예외를 던진다."""
         ...
 
-    def exec_command(self, command: str, timeout_seconds: float) -> CommandResult:
+    def exec_command(
+        self,
+        command: str,
+        timeout_seconds: float,
+        *,
+        on_output_line: Callable[[str], None] | None = None,
+    ) -> CommandResult:
         """원격 명령을 실행하고 종료코드를 반환한다.
 
         `timeout_seconds` 초과 시 SSH 세션을 강제 종료하고
         `CommandResult(exit_code=-1, timed_out=True)`를 반환해야 한다(REQ-ATA-041 —
         "SSH 세션을 강제 종료해야 하며"는 세션 종료를 요구할 뿐, 원격 프로세스
         자체의 종료까지 보장할 필요는 없다).
+
+        SPEC-ANALYZER-TRAIN-OBSV-001 REQ-ATO-001/003/009: 구현은 이 호출 동안
+        원격 stdout/stderr를 라인 단위로 지속 소비해야 한다(콜백 인자 전달
+        여부와 무관하게 항상 드레인됨) — SSH 채널 버퍼 포화로 인한 원격
+        프로세스의 `write()` 블로킹을 방지하기 위함이다. `on_output_line`은
+        옵셔널 키워드 인자(기본값 `None`)로, 지정되면 소비한 각 라인을
+        전달받는다(값이 `None`이면 드레인은 계속하되 콜백 호출만 생략한다).
         """
         ...
 
@@ -104,6 +140,9 @@ class ParamikoSshConnection:
         private_key_path: Path,
         known_hosts_path: Path,
         connect_timeout_seconds: float = _DEFAULT_CONNECT_TIMEOUT_SECONDS,
+        poll_interval_seconds: float = _DEFAULT_POLL_INTERVAL_SECONDS,
+        time_fn: Callable[[], float] = time.monotonic,
+        sleep_fn: Callable[[float], None] = time.sleep,
     ) -> None:
         validate_private_key_permissions(private_key_path)
         self._host = host
@@ -111,11 +150,15 @@ class ParamikoSshConnection:
         self._username = username
         self._private_key_path = private_key_path
         self._connect_timeout_seconds = connect_timeout_seconds
+        self._poll_interval_seconds = poll_interval_seconds
+        self._time_fn = time_fn
+        self._sleep_fn = sleep_fn
         self._client = paramiko.SSHClient()
         self._client.load_host_keys(str(known_hosts_path))
         self._client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
     def connect(self) -> None:
+
         self._client.connect(
             hostname=self._host,
             port=self._port,
@@ -126,21 +169,70 @@ class ParamikoSshConnection:
             timeout=self._connect_timeout_seconds,
         )
 
-    def exec_command(self, command: str, timeout_seconds: float) -> CommandResult:
+    def exec_command(
+        self,
+        command: str,
+        timeout_seconds: float,
+        *,
+        on_output_line: Callable[[str], None] | None = None,
+    ) -> CommandResult:
         transport = self._client.get_transport()
         if transport is None:
             raise ConnectionError("SSH transport가 없습니다 — connect()를 먼저 호출하세요")
         channel = transport.open_session()
-        channel.settimeout(timeout_seconds)
+        # REQ-ATO-010: recv_exit_status()는 settimeout() 값을 준수하지 않는다
+        # (모듈 docstring 참조) — 여기서는 recv()/recv_stderr()류의 개별 논블로킹
+        # 폴링만을 위해 0으로 설정하고, 타임아웃 자체는 이 메서드가 직접
+        # `time_fn`/데드라인으로 강제한다.
+        channel.settimeout(0.0)
         channel.exec_command(command)
-        try:
-            exit_code = channel.recv_exit_status()
-        except TimeoutError:
-            channel.close()
-            return CommandResult(exit_code=-1, timed_out=True)
-        return CommandResult(exit_code=exit_code)
+
+        deadline = self._time_fn() + timeout_seconds
+        stdout_buffer = b""
+        stderr_buffer = b""
+        while True:
+            made_progress = False
+
+            if channel.recv_ready():
+                chunk = channel.recv(_CHANNEL_READ_CHUNK_BYTES)
+                if chunk:
+                    made_progress = True
+                    stdout_buffer = self._drain_lines(stdout_buffer + chunk, on_output_line)
+
+            if channel.recv_stderr_ready():
+                chunk = channel.recv_stderr(_CHANNEL_READ_CHUNK_BYTES)
+                if chunk:
+                    made_progress = True
+                    stderr_buffer = self._drain_lines(stderr_buffer + chunk, on_output_line)
+
+            # REQ-ATO-026/D7: 완료 판정의 유일한 근거는 종료코드 획득 경로다 —
+            # 스트림 EOF(recv_ready()/recv_stderr_ready()가 False)만으로는
+            # 완료를 추론하지 않는다.
+            if channel.exit_status_ready():
+                exit_code = channel.recv_exit_status()
+                return CommandResult(exit_code=exit_code)
+
+            if self._time_fn() >= deadline:
+                channel.close()
+                return CommandResult(exit_code=-1, timed_out=True)
+
+            if not made_progress:
+                self._sleep_fn(self._poll_interval_seconds)
+
+    @staticmethod
+    def _drain_lines(buffer: bytes, on_output_line: Callable[[str], None] | None) -> bytes:
+        """REQ-ATO-001: 개행 경계로 완성된 라인만 콜백에 전달하고 미완성 잔여
+        바이트(부분 라인)는 다음 read에서 결합하도록 그대로 반환한다."""
+        if b"\n" not in buffer:
+            return buffer
+        *complete_lines, remainder = buffer.split(b"\n")
+        if on_output_line is not None:
+            for raw_line in complete_lines:
+                on_output_line(raw_line.decode("utf-8", errors="replace"))
+        return remainder
 
     def close(self) -> None:
+
         self._client.close()
 
 

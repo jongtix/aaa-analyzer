@@ -5,6 +5,7 @@ WoL→SSH→터널+디스패치→완료감지→프로모션/실패처리 전�
 `@pytest.mark.integration`이 아닌 일반 단위 테스트다.
 """
 
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 
@@ -51,7 +52,13 @@ class _FakeConnection:
             self._connect_failures_remaining -= 1
             raise ConnectionError("connect failed (fake)")
 
-    def exec_command(self, command: str, timeout_seconds: float) -> CommandResult:
+    def exec_command(
+        self,
+        command: str,
+        timeout_seconds: float,
+        *,
+        on_output_line: Callable[[str], None] | None = None,
+    ) -> CommandResult:
         self.executed_commands.append(command)
         if self._exec_results:
             return self._exec_results.pop(0)
