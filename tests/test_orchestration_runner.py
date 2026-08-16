@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from prometheus_client import CollectorRegistry
 
+from analyzer.common.trace import get_trace_id
 from analyzer.orchestration.config import AutomationConfig
 from analyzer.orchestration.metrics import (
     LAST_SUCCESS_TIMESTAMP_NAME,
@@ -518,3 +519,77 @@ class TestExecuteScheduledTrainingRunStageTransitionLogs:
         assert "run_id=run-10" in caplog.text
         assert "remote exit code received" in caplog.text
         assert "promotion result" in caplog.text
+
+
+class TestExecuteScheduledTrainingRunTraceIdPropagation:
+    """AC-ATO-008(REQ-ATO-012/013/014): run_id가 오케스트레이터 단계 전이
+    로그(릴레이 대상)의 trace_id 필드에 반영되어야 한다. `execute_scheduled_
+    training_run()`이 `set_trace_id(run_id)`를 호출하지 않으면 이 컨텍스트변수는
+    None으로 남아 회귀를 즉시 드러낸다."""
+
+    def test_stage_transition_logs_carry_run_id_as_trace_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import analyzer.orchestration.runner as runner_module
+
+        config = _make_config(tmp_path)
+        wol = _FakeWolSender([True])
+        connection = _FakeConnection(
+            exec_results=[CommandResult(exit_code=0), CommandResult(exit_code=0)]
+        )
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+        observed_trace_ids: list[str | None] = []
+        original_info = runner_module._logger.info
+
+        def _capturing_info(*args, **kwargs):
+            observed_trace_ids.append(get_trace_id())
+            return original_info(*args, **kwargs)
+
+        monkeypatch.setattr(runner_module._logger, "info", _capturing_info)
+
+        execute_scheduled_training_run(
+            run_kind="weekly",
+            run_id="run-trace-xyz789",
+            market="domestic",
+            horizon=5,
+            algorithm="lightgbm",
+            data_as_of=date(2026, 8, 11),
+            config=config,
+            wol_sender=wol,
+            connection_factory=lambda: connection,
+            metrics=metrics,
+            sleep_fn=lambda _s: None,
+        )
+
+        # AC-ATO-013(REQ-ATO-021)이 요구하는 5개 단계 전이 로그 중 4개는
+        # `runner._logger`가 남긴다(wol/dispatch start/exit code/promotion) —
+        # 나머지 1개(SSH 연결 성공)는 `ssh_dispatch._logger`가 남기며 이 SPEC의
+        # F4 수정 범위 밖이다(별도 로거 인스턴스).
+        assert len(observed_trace_ids) == 4
+        assert all(trace_id == "run-trace-xyz789" for trace_id in observed_trace_ids)
+
+    def test_trace_id_context_does_not_leak_after_run_completes(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        wol = _FakeWolSender([True])
+        connection = _FakeConnection(
+            exec_results=[CommandResult(exit_code=0), CommandResult(exit_code=0)]
+        )
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        assert get_trace_id() is None
+
+        execute_scheduled_training_run(
+            run_kind="weekly",
+            run_id="run-trace-leak-check",
+            market="domestic",
+            horizon=5,
+            algorithm="lightgbm",
+            data_as_of=date(2026, 8, 11),
+            config=config,
+            wol_sender=wol,
+            connection_factory=lambda: connection,
+            metrics=metrics,
+            sleep_fn=lambda _s: None,
+        )
+
+        assert get_trace_id() is None

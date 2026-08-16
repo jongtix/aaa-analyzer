@@ -25,6 +25,7 @@ from datetime import date
 from typing import Literal
 
 from analyzer.common.logging import get_logger
+from analyzer.common.trace import reset_trace_id, set_trace_id
 from analyzer.orchestration.config import AutomationConfig
 from analyzer.orchestration.failure import TrainingRunFailure, handle_training_run_failure
 from analyzer.orchestration.metrics import TrainingMetrics
@@ -96,114 +97,133 @@ def execute_scheduled_training_run(
     실패 경로(WoL/SSH/학습스크립트/타임아웃)는 모두 동일한
     `handle_training_run_failure()`로 라우팅된다(REQ-ATA-060) — 실패 유형별로
     별도 분기를 추가하지 않는다.
+
+    REQ-ATO-012/013/014(AC-ATO-008): NAS 측 오케스트레이터가 남기는 릴레이·
+    단계 전이 로그의 trace_id 필드가 run_id와 일치하도록, 이 함수 시작 시점에
+    `set_trace_id(run_id)`로 활성 Trace ID를 설정하고 함수 종료(성공/실패/
+    타임아웃 무관) 시 반환된 토큰으로 복원한다 — 동시 실행 중인 무관한
+    컨텍스트로 값이 새어나가지 않게 한다.
     """
-    wol_result = send_with_retry(wol_sender, config.target_mac_address, max_retries=wol_max_retries)
-    # REQ-ATO-021: WoL 송신 결과 단계 전이 로그.
-    _logger.info(
-        "wol send result success=%s run_id=%s",
-        wol_result.success,
-        run_id,
-        extra={"stage_marker": True},
-    )
-    if not wol_result.success:
-        failure = TrainingRunFailure(
-            stage="wol", message=wol_result.error or "WoL 매직패킷 송신 실패", run_id=run_id
-        )
-        handle_training_run_failure(failure, metrics)
-        return RunOutcome(success=False, failure=failure)
-
-    sleep_fn(wol_wait_seconds)  # REQ-ATA-020
-
-    connection = connection_factory()
-    connected = connect_with_retry(
-        connection,
-        max_retries=ssh_max_retries,
-        interval_seconds=ssh_retry_interval_seconds,
-        sleep_fn=sleep_fn,
-    )
-    if not connected:
-        failure = TrainingRunFailure(
-            stage="ssh", message=f"SSH 연결 {ssh_max_retries}회 재시도 실패", run_id=run_id
-        )
-        handle_training_run_failure(failure, metrics)
-        return RunOutcome(success=False, failure=failure)
-
-    timeout_seconds = (
-        config.weekly_timeout_seconds if run_kind == "weekly" else config.monthly_timeout_seconds
-    )
-    # REQ-ATO-021: 디스패치 시작(run_id + 타임아웃값) 단계 전이 로그.
-    _logger.info(
-        "dispatch start run_id=%s timeout_seconds=%s",
-        run_id,
-        timeout_seconds,
-        extra={"stage_marker": True},
-    )
-    staging_path = config.staging_models_root / run_id
-    command = build_remote_dispatch_command(
-        staging_models_root=staging_path,
-        calendar_code=config.calendar_code,
-        cache_dir=config.cache_dir,
-        data_as_of=data_as_of,
-        feature_code_version=config.feature_code_version,
-        db_tunnel_host=config.db_tunnel_host,
-        db_tunnel_key_path=config.db_tunnel_private_key_path,
-        db_tunnel_username=config.db_tunnel_username,
-        db_tunnel_port=config.db_tunnel_port,
-        db_tunnel_local_port=config.db_tunnel_local_port,
-        db_tunnel_remote_port=config.db_tunnel_remote_port,
-        mount_script_path=config.mount_script_path,
-        python_executable_path=config.python_executable_path,
-        mysql_database=config.mysql_database,
-        mysql_trainer_password=config.mysql_trainer_password,
-        trainer_log_base_dir=config.trainer_log_base_dir,
-        run_id=run_id,
-    )
-
+    trace_id_token = set_trace_id(run_id)
     try:
-        result = connection.exec_command(
-            command,
-            timeout_seconds=timeout_seconds,
-            on_output_line=_make_stage_marker_relay(_logger),
+        wol_result = send_with_retry(
+            wol_sender, config.target_mac_address, max_retries=wol_max_retries
         )
-        # REQ-ATO-021: 원격 종료코드 수신 단계 전이 로그.
+        # REQ-ATO-021: WoL 송신 결과 단계 전이 로그.
         _logger.info(
-            "remote exit code received exit_code=%s timed_out=%s run_id=%s",
-            result.exit_code,
-            result.timed_out,
+            "wol send result success=%s run_id=%s",
+            wol_result.success,
             run_id,
             extra={"stage_marker": True},
         )
-
-        if result.timed_out:
+        if not wol_result.success:
             failure = TrainingRunFailure(
-                stage="timeout", message=f"{timeout_seconds}초 타임아웃 초과", run_id=run_id
+                stage="wol", message=wol_result.error or "WoL 매직패킷 송신 실패", run_id=run_id
             )
             handle_training_run_failure(failure, metrics)
             return RunOutcome(success=False, failure=failure)
 
-        if result.exit_code != 0:
+        sleep_fn(wol_wait_seconds)  # REQ-ATA-020
+
+        connection = connection_factory()
+        connected = connect_with_retry(
+            connection,
+            max_retries=ssh_max_retries,
+            interval_seconds=ssh_retry_interval_seconds,
+            sleep_fn=sleep_fn,
+        )
+        if not connected:
             failure = TrainingRunFailure(
-                stage="training",
-                message=f"학습 스크립트 종료코드 {result.exit_code}",
-                run_id=run_id,
+                stage="ssh", message=f"SSH 연결 {ssh_max_retries}회 재시도 실패", run_id=run_id
             )
             handle_training_run_failure(failure, metrics)
             return RunOutcome(success=False, failure=failure)
 
-        # plan.md §B.5(D6): 이 지점에 도달했다는 것 자체가 SSH 종료코드 0을
-        # 의미한다 — 프로모션은 오직 이 성공 경로에서만 호출된다.
-        promoted = promote_staging_to_active(connection, staging_path, config.active_models_root)
-        # REQ-ATO-021: 프로모션 결과 단계 전이 로그.
+        timeout_seconds = (
+            config.weekly_timeout_seconds
+            if run_kind == "weekly"
+            else config.monthly_timeout_seconds
+        )
+        # REQ-ATO-021: 디스패치 시작(run_id + 타임아웃값) 단계 전이 로그.
         _logger.info(
-            "promotion result promoted=%s run_id=%s", promoted, run_id, extra={"stage_marker": True}
+            "dispatch start run_id=%s timeout_seconds=%s",
+            run_id,
+            timeout_seconds,
+            extra={"stage_marker": True},
         )
-        metrics.record_success(
-            market=market, horizon=horizon, algorithm=algorithm, timestamp=time_fn()
+        staging_path = config.staging_models_root / run_id
+        command = build_remote_dispatch_command(
+            staging_models_root=staging_path,
+            calendar_code=config.calendar_code,
+            cache_dir=config.cache_dir,
+            data_as_of=data_as_of,
+            feature_code_version=config.feature_code_version,
+            db_tunnel_host=config.db_tunnel_host,
+            db_tunnel_key_path=config.db_tunnel_private_key_path,
+            db_tunnel_username=config.db_tunnel_username,
+            db_tunnel_port=config.db_tunnel_port,
+            db_tunnel_local_port=config.db_tunnel_local_port,
+            db_tunnel_remote_port=config.db_tunnel_remote_port,
+            mount_script_path=config.mount_script_path,
+            python_executable_path=config.python_executable_path,
+            mysql_database=config.mysql_database,
+            mysql_trainer_password=config.mysql_trainer_password,
+            trainer_log_base_dir=config.trainer_log_base_dir,
+            run_id=run_id,
         )
-        return RunOutcome(success=True, promoted=promoted)
 
+        try:
+            result = connection.exec_command(
+                command,
+                timeout_seconds=timeout_seconds,
+                on_output_line=_make_stage_marker_relay(_logger),
+            )
+            # REQ-ATO-021: 원격 종료코드 수신 단계 전이 로그.
+            _logger.info(
+                "remote exit code received exit_code=%s timed_out=%s run_id=%s",
+                result.exit_code,
+                result.timed_out,
+                run_id,
+                extra={"stage_marker": True},
+            )
+
+            if result.timed_out:
+                failure = TrainingRunFailure(
+                    stage="timeout", message=f"{timeout_seconds}초 타임아웃 초과", run_id=run_id
+                )
+                handle_training_run_failure(failure, metrics)
+                return RunOutcome(success=False, failure=failure)
+
+            if result.exit_code != 0:
+                failure = TrainingRunFailure(
+                    stage="training",
+                    message=f"학습 스크립트 종료코드 {result.exit_code}",
+                    run_id=run_id,
+                )
+                handle_training_run_failure(failure, metrics)
+                return RunOutcome(success=False, failure=failure)
+
+            # plan.md §B.5(D6): 이 지점에 도달했다는 것 자체가 SSH 종료코드 0을
+            # 의미한다 — 프로모션은 오직 이 성공 경로에서만 호출된다.
+            promoted = promote_staging_to_active(
+                connection, staging_path, config.active_models_root
+            )
+            # REQ-ATO-021: 프로모션 결과 단계 전이 로그.
+            _logger.info(
+                "promotion result promoted=%s run_id=%s",
+                promoted,
+                run_id,
+                extra={"stage_marker": True},
+            )
+            metrics.record_success(
+                market=market, horizon=horizon, algorithm=algorithm, timestamp=time_fn()
+            )
+            return RunOutcome(success=True, promoted=promoted)
+
+        finally:
+            # REQ-ATA-032/AC-ATA-006: 성공·실패·타임아웃 무관 SSH 세션을 정리한다.
+            # db_tunnel 자체의 해제는 원격 셸 스크립트의 trap이 담당한다
+            # (ssh_dispatch.build_remote_dispatch_command).
+            connection.close()
     finally:
-        # REQ-ATA-032/AC-ATA-006: 성공·실패·타임아웃 무관 SSH 세션을 정리한다.
-        # db_tunnel 자체의 해제는 원격 셸 스크립트의 trap이 담당한다
-        # (ssh_dispatch.build_remote_dispatch_command).
-        connection.close()
+        reset_trace_id(trace_id_token)
