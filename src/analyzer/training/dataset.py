@@ -12,7 +12,6 @@ SPEC-ANALYZER-TRAIN-001 M1(REQ-AT-020/022/023/025): `assemble_dataset()`이
 전달한다(`compute_labels()`의 순수 함수 설계 원칙을 그대로 계승).
 """
 
-import logging
 from collections.abc import Mapping
 
 import pandas as pd
@@ -23,6 +22,7 @@ import pandas as pd
 # 동일 패턴 계승)이 이 조립 경로에서도 재발하지 않도록 방어한다.
 import analyzer.data.dividend_adjustment  # noqa: F401
 import analyzer.data.split  # noqa: F401
+from analyzer.common.logging import get_logger
 from analyzer.data.adjustment import HANDLER_REGISTRY, adjust_prices
 from analyzer.data.models import TradingCalendar
 from analyzer.features.supply_demand import compute_supply_demand_features
@@ -49,7 +49,7 @@ _EMPTY_EVENTS_COLUMNS = [
     "currency_code",
 ]
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _PROGRESS_BATCH_SIZE = 25
 """SPEC-ANALYZER-TRAIN-OBSV-001 REQ-ATO-016: 25종목마다 1회 진행 로그를

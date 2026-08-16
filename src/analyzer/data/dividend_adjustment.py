@@ -27,17 +27,17 @@ as-of 컷오프(REQ-AD-040)는 이 핸들러 스스로 책임진다: 해소된 `
 컷오프로 사용해서는 안 된다.
 """
 
-import logging
 from datetime import date
 from typing import cast
 
 import pandas as pd
 
+from analyzer.common.logging import get_logger
 from analyzer.data.adjustment import register_handler
 from analyzer.data.dividend import derive_ex_date
 from analyzer.data.models import TradingCalendar
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _PRICE_COLUMN_SUFFIX = "_price"
 _KRX_CALENDAR_CODES = frozenset({"KRX"})
