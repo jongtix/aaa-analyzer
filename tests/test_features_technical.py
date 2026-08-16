@@ -120,6 +120,168 @@ class TestRollingCorr:
         assert result.iloc[5]["CORR_5"] == pytest.approx(1.0, abs=1e-4)
 
 
+class TestRollingCorrTradingHaltZeroVariance:
+    """AC-AF-003 (REQ-AF-023) 회귀 방어: 거래정지(volume=0) 구간이 롤링 윈도우에
+    포함되면 종가·거래량 분산이 0에 수렴해 pandas가 0/0을 NaN 대신 inf/-inf로
+    반환한다. supply_demand.py REQ-AF-032의 0-분모 방어(AC-AF-007)와 동일한
+    패턴을 CORR_{window}에도 적용해야 한다.
+
+    실측 재현(2026-08-16 SPEC-ANALYZER-TRAIN-OBSV-001 M7 라이브 검증 중 발견):
+    035900 2007-07-16~2007-08-08(17거래일). 2007-07-27부터 거래정지(volume=0)가
+    지속되며 종가도 정지 직전 값으로 고정된다. 2007-08-08 시점 CORR_10의 10일
+    롤링 윈도우 안에서 종가·거래량 분산이 모두 0으로 수렴해 실제로
+    CORR_10=-inf를 반환하던 캐시 피처 파일
+    (features_domestic_2026-08-16_v1.parquet)에서 직접 확인한 결함.
+    """
+
+    def test_corr_10_is_nan_not_inf_when_trading_halt_enters_window(self):
+        rows = [
+            {
+                "trade_date": "2007-07-16",
+                "open_price": 591.954669978372,
+                "high_price": 615.6328567775067,
+                "low_price": 591.954669978372,
+                "close_price": 591.954669978372,
+                "volume": 481849.60000000003,
+            },
+            {
+                "trade_date": "2007-07-18",
+                "open_price": 615.6328567775067,
+                "high_price": 615.6328567775067,
+                "low_price": 568.2764831792371,
+                "close_price": 591.954669978372,
+                "volume": 817941.6000000001,
+            },
+            {
+                "trade_date": "2007-07-19",
+                "open_price": 591.954669978372,
+                "high_price": 591.954669978372,
+                "low_price": 544.5982963801022,
+                "close_price": 568.2764831792371,
+                "volume": 1273147.6,
+            },
+            {
+                "trade_date": "2007-07-20",
+                "open_price": 544.5982963801022,
+                "high_price": 568.2764831792371,
+                "low_price": 520.9201095809673,
+                "close_price": 568.2764831792371,
+                "volume": 1018242.0,
+            },
+            {
+                "trade_date": "2007-07-23",
+                "open_price": 544.5982963801022,
+                "high_price": 615.6328567775067,
+                "low_price": 520.9201095809673,
+                "close_price": 544.5982963801022,
+                "volume": 4418655.8,
+            },
+            {
+                "trade_date": "2007-07-24",
+                "open_price": 520.9201095809673,
+                "high_price": 544.5982963801022,
+                "low_price": 497.2419227818324,
+                "close_price": 520.9201095809673,
+                "volume": 1552396.8,
+            },
+            {
+                "trade_date": "2007-07-25",
+                "open_price": 520.9201095809673,
+                "high_price": 520.9201095809673,
+                "low_price": 473.5637359826975,
+                "close_price": 497.2419227818324,
+                "volume": 1210818.4000000001,
+            },
+            {
+                "trade_date": "2007-07-26",
+                "open_price": 497.2419227818324,
+                "high_price": 497.2419227818324,
+                "low_price": 426.20736238442777,
+                "close_price": 426.20736238442777,
+                "volume": 3167898.8000000003,
+            },
+            {
+                "trade_date": "2007-07-27",
+                "open_price": 426.20736238442777,
+                "high_price": 426.20736238442777,
+                "low_price": 426.20736238442777,
+                "close_price": 426.20736238442777,
+                "volume": 0.0,
+            },
+            {
+                "trade_date": "2007-07-30",
+                "open_price": 426.20736238442777,
+                "high_price": 426.20736238442777,
+                "low_price": 426.20736238442777,
+                "close_price": 426.20736238442777,
+                "volume": 0.0,
+            },
+            {
+                "trade_date": "2007-07-31",
+                "open_price": 426.20736238442777,
+                "high_price": 426.20736238442777,
+                "low_price": 426.20736238442777,
+                "close_price": 426.20736238442777,
+                "volume": 0.0,
+            },
+            {
+                "trade_date": "2007-08-01",
+                "open_price": 426.20736238442777,
+                "high_price": 426.20736238442777,
+                "low_price": 426.20736238442777,
+                "close_price": 426.20736238442777,
+                "volume": 0.0,
+            },
+            {
+                "trade_date": "2007-08-02",
+                "open_price": 426.20736238442777,
+                "high_price": 426.20736238442777,
+                "low_price": 426.20736238442777,
+                "close_price": 426.20736238442777,
+                "volume": 0.0,
+            },
+            {
+                "trade_date": "2007-08-03",
+                "open_price": 426.20736238442777,
+                "high_price": 426.20736238442777,
+                "low_price": 426.20736238442777,
+                "close_price": 426.20736238442777,
+                "volume": 0.0,
+            },
+            {
+                "trade_date": "2007-08-06",
+                "open_price": 426.20736238442777,
+                "high_price": 426.20736238442777,
+                "low_price": 426.20736238442777,
+                "close_price": 426.20736238442777,
+                "volume": 0.0,
+            },
+            {
+                "trade_date": "2007-08-07",
+                "open_price": 426.20736238442777,
+                "high_price": 426.20736238442777,
+                "low_price": 426.20736238442777,
+                "close_price": 426.20736238442777,
+                "volume": 0.0,
+            },
+            {
+                "trade_date": "2007-08-08",
+                "open_price": 426.20736238442777,
+                "high_price": 426.20736238442777,
+                "low_price": 426.20736238442777,
+                "close_price": 426.20736238442777,
+                "volume": 0.0,
+            },
+        ]
+        df = _adjusted_price_frame(rows)
+
+        result = compute_technical_features(df)
+        corr_10 = result.iloc[-1]["CORR_10"]
+
+        assert math.isnan(corr_10)
+        assert not math.isinf(corr_10)
+
+
 class TestNaNPropagationOnInsufficientObservations:
     """AC-AF-004 (REQ-AF-024): 관측치 부족 시 NaN, 0/전방채움 금지."""
 

@@ -12,6 +12,13 @@ ROC/MA/STD/RANK/CORR 5개 계열 = 25개 기술적 피처를 계산한다.
 `min_periods`를 재정의하지 않는다 — pandas rolling 기본값(`min_periods=w`)이
 관측치 부족 시 자동으로 NaN을 반환하므로 REQ-AF-024(NaN 전파, 0/전방채움
 금지)를 별도 로직 없이 자연히 충족한다(plan.md §B 리스크 4).
+
+`CORR_{window}`(종가-거래량 롤링 피어슨 상관계수)는 거래정지(volume=0) 구간이
+롤링 윈도우에 포함되면 종가·거래량 분산이 0에 수렴해 pandas가 0/0을 NaN이
+아니라 `inf`/`-inf`로 반환한다(실측: 035900 2007-08-08 CORR_10=-inf,
+supply_demand.py REQ-AF-032와 동일한 종류의 pandas 0-나눗셈 위험). NaN이
+아닌 `inf`/`-inf`는 REQ-AF-024가 요구하는 결측 표현이 아니므로 명시적으로
+NaN 치환한다.
 """
 
 import pandas as pd
@@ -44,6 +51,7 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
         result[f"MA_{window}"] = rolling_close.mean() / close_price - 1
         result[f"STD_{window}"] = rolling_close.std() / close_price
         result[f"RANK_{window}"] = rolling_close.rank(pct=True)
-        result[f"CORR_{window}"] = close_price.rolling(window=window).corr(volume)
+        corr = close_price.rolling(window=window).corr(volume)
+        result[f"CORR_{window}"] = corr.replace([float("inf"), float("-inf")], float("nan"))
 
     return result
