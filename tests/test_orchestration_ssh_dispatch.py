@@ -825,88 +825,119 @@ class TestParamikoSshConnectionMockedIO:
         connection._client.close.assert_called_once()  # pyright: ignore[reportAttributeAccessIssue]
 
 
-class BufferOverflowError(RuntimeError):
-    """테스트 전용 — 채널 버퍼 포화를 결정론적으로 시뮬레이션한다(AC-ATO-001/002).
+class _FlowControlledChannel:
+    """paramiko 채널을 흉내내는 결정론적 페이크 — 실 SSH 채널의 window 기반
+    흐름 제어를 모사한다(AC-ATO-001/002, D-NEW-1 재작성).
 
-    실제 OS 레벨 write() 블로킹을 재현하지 않고도(테스트가 무한정 멈추는 것을
-    피하면서) "소비되지 않았다면 블로킹했을 것"이라는 조건을 결정론적으로
-    검증하기 위한 acceptance.md AC-ATO-001 명시 설계다.
+    `_FakeBufferedChannelConnection`(구 버전)이 자체 for 루프로 소비 모델을
+    재구현해 `SshConnection.exec_command()`의 자기 자신의 점유량 로직만
+    검증했던 결함(F1)을 수정한다 — 이 페이크는 `ParamikoSshConnection.
+    exec_command()`가 실제로 `channel.recv_ready()`/`recv()`를 폴링하는
+    루프에 물려서만 동작하도록 설계됐다.
+
+    원격은 로컬이 `recv()`로 버퍼를 비운 만큼만 새 라인을 채널에 '전달'할 수
+    있다(`_top_up`) — `buffer_capacity`를 초과하는 라인은 아직 도착하지 않은
+    것으로 취급한다. `exit_status_ready()`는 전체 라인이 전달·소비 완료된
+    뒤에만 `True`가 되므로, 읽기 루프(`recv()` 폴링)가 없거나 제거되면
+    `_top_up()`이 최초 1회 이후 다시는 호출되지 않아 전달이 멈추고
+    `exit_status_ready()`가 영원히 `False`로 남는다 — 이 경우
+    `exec_command()`는 자체 데드라인 추적(REQ-ATO-009)에 의해 타임아웃으로
+    종료된다. 즉 향후 읽기 루프가 실수로 제거되면 아래 테스트가 완료
+    실패(exit_code != 0 또는 timed_out=True) 또는 `recv_call_count` 불일치로
+    즉시 실패한다.
     """
 
-
-class _FakeBufferedChannelConnection:
-    """채널 버퍼를 유한 용량 큐로 시뮬레이션하는 `SshConnection` 페이크.
-
-    `exec_command()`가 `on_output_line` 콜백을 받으면 라인마다 즉시 "소비"한
-    것으로 간주해 점유량을 즉시 되돌린다 — 신규 읽기 루프가 라인 단위로
-    지속 드레인하는 것과 동등한 소비 모델이다(AC-ATO-001). 콜백이 `None`이면
-    소비가 전혀 일어나지 않아, 읽기 루프가 없던 구현 이전 경로와 동등하게
-    버퍼가 무한정 쌓여 용량 초과 시 `BufferOverflowError`를 던진다(AC-ATO-002).
-    """
-
-    def __init__(self, *, buffer_capacity: int, remote_lines: list[str]) -> None:
+    def __init__(self, *, buffer_capacity: int, total_lines: int) -> None:
         self._buffer_capacity = buffer_capacity
-        self._remote_lines = list(remote_lines)
+        self._remaining_lines = [f"line-{i}" for i in range(total_lines)]
+        self._undrained_lines: list[str] = []
         self.max_concurrent_unconsumed = 0
+        self.recv_call_count = 0
+        self.closed = False
+        self._top_up()
 
-    def connect(self) -> None:
+    def _top_up(self) -> None:
+        while len(self._undrained_lines) < self._buffer_capacity and self._remaining_lines:
+            self._undrained_lines.append(self._remaining_lines.pop(0))
+            self.max_concurrent_unconsumed = max(
+                self.max_concurrent_unconsumed, len(self._undrained_lines)
+            )
+
+    def settimeout(self, _value: float) -> None:
         pass
 
-    def exec_command(
-        self,
-        command: str,
-        timeout_seconds: float,
-        *,
-        on_output_line=None,
-    ) -> CommandResult:
-        occupancy = 0
-        for line in self._remote_lines:
-            occupancy += 1
-            self.max_concurrent_unconsumed = max(self.max_concurrent_unconsumed, occupancy)
-            if occupancy > self._buffer_capacity:
-                raise BufferOverflowError(
-                    f"채널 버퍼 용량({self._buffer_capacity}) 초과 — 소비되지 않은 라인이 누적됐다"
-                )
-            if on_output_line is not None:
-                on_output_line(line)
-                occupancy -= 1
-        return CommandResult(exit_code=0)
+    def exec_command(self, _command: str) -> None:
+        pass
+
+    def recv_ready(self) -> bool:
+        return len(self._undrained_lines) > 0
+
+    def recv(self, _chunk_size: int) -> bytes:
+        self.recv_call_count += 1
+        if not self._undrained_lines:
+            return b""
+        line = self._undrained_lines.pop(0)
+        self._top_up()
+        return (line + "\n").encode()
+
+    def recv_stderr_ready(self) -> bool:
+        return False
+
+    def recv_stderr(self, _chunk_size: int) -> bytes:
+        return b""
+
+    def exit_status_ready(self) -> bool:
+        return not self._remaining_lines and not self._undrained_lines
+
+    def recv_exit_status(self) -> int:
+        return 0
 
     def close(self) -> None:
-        pass
+        self.closed = True
 
 
 class TestChannelBufferSaturationPrevention:
-    """AC-ATO-001/002(REQ-ATO-001): 읽기 루프가 라인마다 즉시 소비하면 채널
-    버퍼가 사전 정의된 용량을 초과하지 않고, 소비가 없으면(구현 이전과 동등한
-    경로) 결함이 실제로 재현된다."""
+    """AC-ATO-001/002(REQ-ATO-001, F1 재작성): `ParamikoSshConnection.
+    exec_command()`(실 구현) 자체를, 흐름 제어 모델을 갖춘 모의 paramiko
+    채널을 대상으로 검증한다 — 콜백 존재 여부가 아니라 실 코드가 실제로
+    `channel.recv()`를 호출하는지 자체를 검증한다."""
 
-    def test_draining_callback_prevents_buffer_overflow(self):
-        """AC-ATO-001: 콜백(드레인)이 있으면 10,000라인 전체가 예외 없이
-        처리되고, 최대 동시 미소비 라인 수가 버퍼 용량을 초과하지 않는다."""
-        connection = _FakeBufferedChannelConnection(
-            buffer_capacity=10, remote_lines=[f"line-{i}" for i in range(10_000)]
-        )
+    def test_real_exec_command_drains_without_buffer_overflow(self, tmp_path: Path):
+        """AC-ATO-001: 실 `exec_command()`가 10,000라인을 예외/타임아웃 없이
+        전부 소비하고, 동시 미소비 라인 수가 채널 버퍼 용량(10)을 초과하지
+        않는다."""
+        connection = _make_connection_with_mocked_client(tmp_path)
+        mock_transport = MagicMock()
+        channel = _FlowControlledChannel(buffer_capacity=10, total_lines=10_000)
+        mock_transport.open_session.return_value = channel
+        connection._client.get_transport.return_value = mock_transport  # pyright: ignore[reportAttributeAccessIssue]
         consumed: list[str] = []
 
         result = connection.exec_command("cmd", timeout_seconds=5.0, on_output_line=consumed.append)
 
         assert result == CommandResult(exit_code=0)
         assert len(consumed) == 10_000
-        assert connection.max_concurrent_unconsumed <= 10
+        assert channel.max_concurrent_unconsumed <= 10
 
-    def test_characterization_regression_without_drain_reproduces_defect(self):
-        """AC-ATO-002(D3): 읽기 루프가 없는(구현 이전과 동등한) 경로 — 콜백을
-        전달하지 않으면 채널 버퍼 용량 초과로 `BufferOverflowError`가 발생해야
-        한다. 이 특성화 회귀 테스트는 이번 결함이 실제로 재현 가능했음을
-        구조적으로 증명하며, 향후 읽기 루프가 실수로 제거되면 즉시 실패해야
-        한다(테스트 스위트에 영구 보존)."""
-        connection = _FakeBufferedChannelConnection(
-            buffer_capacity=10, remote_lines=[f"line-{i}" for i in range(10_000)]
-        )
+    def test_characterization_regression_recv_calls_tied_to_drain_loop(self, tmp_path: Path):
+        """AC-ATO-002(D3, F1 재작성): 읽기 루프가 라인 단위로 채널을 폴링한
+        횟수(`recv_call_count`)가 실제 전달된 라인 수와 정확히 일치해야 한다.
+        이 특성화 회귀 테스트는 실 `exec_command()`를 대상으로 하므로, 향후
+        읽기 루프의 `channel.recv()` 호출이 실수로 제거되거나 우회되면
+        `_FlowControlledChannel`이 더 이상 신규 라인을 전달하지 못해
+        `exit_status_ready()`가 영원히 `False`로 남고, 결과적으로 이 테스트가
+        타임아웃 결과(exit_code=-1, timed_out=True) 또는 `recv_call_count`
+        불일치로 즉시 실패한다(테스트 스위트에 영구 보존)."""
+        connection = _make_connection_with_mocked_client(tmp_path)
+        mock_transport = MagicMock()
+        channel = _FlowControlledChannel(buffer_capacity=10, total_lines=10_000)
+        mock_transport.open_session.return_value = channel
+        connection._client.get_transport.return_value = mock_transport  # pyright: ignore[reportAttributeAccessIssue]
 
-        with pytest.raises(BufferOverflowError):
-            connection.exec_command("cmd", timeout_seconds=5.0)
+        result = connection.exec_command("cmd", timeout_seconds=5.0)
+
+        assert result == CommandResult(exit_code=0)
+        assert channel.recv_call_count == 10_000
 
 
 class TestReadLoopCompletionRequiresExitCodePath:
