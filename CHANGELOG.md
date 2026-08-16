@@ -1,6 +1,115 @@
 # CHANGELOG
 
 
+## v0.11.0 (2026-08-16)
+
+### ✨
+
+- ✨ feat(SPEC-ANALYZER-TRAIN-OBSV-001): M1 SSH 채널 드레인 루프 + 자체 타임아웃 재설계
+  ([`2756ccb`](https://github.com/jongtix/aaa-analyzer/commit/2756ccb28bd86c205211abcd79c46c38fe81356f))
+
+exec_command()를 폴링 드레인 루프로 전면 재구현해 SSH 채널 버퍼 포화로 인한 원격 프로세스 write() 블로킹(15시간 데드락
+  실측)을 구조적으로 방지한다(REQ-ATO-001/003, 보편 적용). recv_exit_status()가 settimeout() 값을 준수하지 않는 실측
+  근본원인에 대응해, 읽기 루프 자체가 time.monotonic() 데드라인을 추적해 타임아웃을 강제한다(REQ-ATO-009/011). 완료
+  판정은 여전히 exit_status_ready() 종료코드 획득 경로 단독이며, 스트림 EOF만으로는 완료를 추론하지 않는다(REQ-ATO-026).
+
+SPEC: SPEC-ANALYZER-TRAIN-OBSV-001
+
+- ✨ feat(SPEC-ANALYZER-TRAIN-OBSV-001): M2 트레이너 파일 sink + 저볼륨 릴레이 배선
+  ([`2f7e33c`](https://github.com/jongtix/aaa-analyzer/commit/2f7e33c7d7d1d70276b7615755397e5689205a25))
+
+AutomationConfig에 trainer_log_base_dir 필드(필수 env var, 기본값 없음)를 추가한다(REQ-ATO-005). 원격 디스패치 명령에
+  trainer_<run_id>.log tee 리다이렉션을 배선해 원격 학습 CLI stdout/stderr 전체를 원문 영속 기록하며, 마운트 확인
+  게이트 이후에만 시작된다(REQ-ATO-004/008). NAS 측 릴레이는 stage_marker:true JSON 필드 기반 저볼륨 요약만 전달해
+  트레이너 파일과의 이중 적재를 방지한다(REQ-ATO-002/007).
+
+SPEC: SPEC-ANALYZER-TRAIN-OBSV-001
+
+- ✨ feat(SPEC-ANALYZER-TRAIN-OBSV-001): M3 run_id → trace_id 전파
+  ([`afcdaa5`](https://github.com/jongtix/aaa-analyzer/commit/afcdaa5411292610b8e49338c72fa1f7b0c7e254))
+
+NAS 오케스트레이터가 발급한 run_id를 TRAIN_RUN_ID env var로 원격 학습 CLI에 전달하고(shlex.quote 이스케이프,
+  REQ-ATO-012/014), train.py main()이 기존 trace_id 유틸리티(set_trace_id())로 즉시 설정한다(REQ-ATO-013) — NAS
+  오케스트레이션 로그와 원격 trainer 로그를 동일 trace_id로 상관 조회 가능하게 한다. env var 부재 시 fail-open.
+
+SPEC: SPEC-ANALYZER-TRAIN-OBSV-001
+
+- ✨ feat(SPEC-ANALYZER-TRAIN-OBSV-001): M4 파이프라인 진행 로그 + 배치 집계 + traceback 보존
+  ([`bef9502`](https://github.com/jongtix/aaa-analyzer/commit/bef95029028866e56044c2b648ae40ac4d435b76))
+
+학습 파이프라인에 시장별 시작·유니버스 크기·데이터셋 캐시 히트/미스·조립 완료 행수·horizon별 유효 레이블 행수·16개
+  모델 조합 학습 시작/완료+저장 경로 단계 전이 로그를 추가한다(REQ-ATO-018/019). 종목별 조회·데이터셋 조립 루프는
+  25종목마다 1회, 배당 스킵 경고는 25건마다 1회 집계 로그로 전환한다(REQ-ATO-015/016/017). 실패 시 전체 traceback을
+  로그로 남기되 TrainingPipelineResult.error 반환 타입(문자열)은 그대로 유지한다(REQ-ATO-020). 오케스트레이터에
+  WoL·SSH 연결·디스패치 시작·원격 종료코드·프로모션 결과 단계 전이 로그를 추가한다(REQ-ATO-021).
+
+SPEC: SPEC-ANALYZER-TRAIN-OBSV-001
+
+- ✨ feat(SPEC-ANALYZER-TRAIN-OBSV-001): M5 프레임워크 로거 라우팅 + 실패 처리 경로 로거 교체
+  ([`c507465`](https://github.com/jongtix/aaa-analyzer/commit/c50746517998a46a4577d3b5df275f0f23b1a4d7))
+
+orchestration/failure.py의 로거를 raw 표준 로거에서 기존 구조화 JSON 로거(analyzer.common.logging.get_logger)로
+  교체해 평문 stderr 유출을 제거한다(REQ-ATO-022). LightGBM/XGBoost verbosity를 완전 무음에서 Error/Warning·warning
+  레벨로 낮추고, LightGBM 네이티브 로그는 lgb.register_logger()로 analyzer 구조화 로거에 라우팅한다(REQ-ATO-023/024).
+  XGBoost는 공식 로거 라우팅 API가 없어 M2의 원격 셸 리다이렉션(tee)을 통해 트레이너 파일로 stderr가 합류한다
+  (REQ-ATO-025) — vector 파싱 보존 여부는 M7 라이브 검증에서 확인한다.
+
+SPEC: SPEC-ANALYZER-TRAIN-OBSV-001
+
+### ✅
+
+- ✅ test(SPEC-ANALYZER-TRAIN-OBSV-001): M6 stderr 채널 드레인 커버리지 보강
+  ([`e6dfa2a`](https://github.com/jongtix/aaa-analyzer/commit/e6dfa2aa3405065a9e03402159c18d66fa1bdc9c))
+
+exec_command()의 stderr 드레인 분기(recv_stderr_ready/recv_stderr)에 대한 명시적 회귀 테스트를 추가한다
+  (REQ-ATO-001) — stdout뿐 아니라 stderr도 동일하게 소비·릴레이됨을 검증. M1~M6 통합 검증: pytest 438건 전부 통과,
+  커버리지 97.01%, ruff/pyright 클린, aaa-infra 레포 무변경, REQ-ATO-001~030 30개 결번 없음 확인.
+
+SPEC: SPEC-ANALYZER-TRAIN-OBSV-001
+
+- ✅ test(SPEC-ANALYZER-TRAIN-OBSV-001): 채널 버퍼 포화 회귀 테스트가 실 구현을 검증하도록 재작성
+  ([`7e9be7d`](https://github.com/jongtix/aaa-analyzer/commit/7e9be7df167c92eeacf5c762d4ba16871e06b70f))
+
+TestChannelBufferSaturationPrevention이 자체 for 루프를 재구현한 페이크(_FakeBufferedChannelConnection)의 점유량
+  로직만 검증해 읽기 루프 자체를 제거해도 실패하지 않던 결함(AC-ATO-001/002 회귀 가드 무력화, sync-auditor FAIL F1)을
+  수정한다. paramiko 채널의 window 기반 흐름 제어를 모사하는 _FlowControlledChannel로 교체해
+  ParamikoSshConnection.exec_command()(실 구현)를 직접 검증한다.
+
+SPEC: SPEC-ANALYZER-TRAIN-OBSV-001
+
+### 🐛
+
+- 🐛 fix(analyzer): 원격 학습 로거를 analyzer 표준 구조화 로거로 교체
+  ([`2ca1e4f`](https://github.com/jongtix/aaa-analyzer/commit/2ca1e4fc3a8100c8f0a1c543494133a33a84c070))
+
+training/dataset.py와 data/dividend_adjustment.py가 raw stdlib logging.getLogger()를 사용해 프로덕션에서
+  REQ-ATO-016 진행 로그가 핸들러 부재로 소실되고 배당 스킵 경고가 평문으로 새어나가던 결함(sync-auditor FAIL F2)을
+  수정한다. analyzer.common.logging.get_logger()로 통일한다.
+
+SPEC: SPEC-ANALYZER-TRAIN-OBSV-001
+
+- 🐛 fix(analyzer): NAS 오케스트레이터 단계 전이 로그의 trace_id를 run_id로 설정
+  ([`109df30`](https://github.com/jongtix/aaa-analyzer/commit/109df30b52a35ed553186f728855a31167d1b82b))
+
+execute_scheduled_training_run()이 시작 시점에 set_trace_id(run_id)를 호출하지 않아 릴레이·단계 전이 로그의
+  trace_id 필드가 run_id를 반영하지 못하던 AC-ATO-008 결함(sync-auditor FAIL F4)을 수정한다. 함수 종료 시 finally에서
+  토큰을 복원해 값이 무관한 컨텍스트로 새어나가지 않게 한다.
+
+SPEC: SPEC-ANALYZER-TRAIN-OBSV-001
+
+- 🐛 fix(analyzer): 원격 디스패치 명령에 트레이너 로그 디렉터리 mkdir -p 추가
+  ([`e30af93`](https://github.com/jongtix/aaa-analyzer/commit/e30af9307ca0636a507454a288160ffb629e0787))
+
+build_remote_dispatch_command()의 tee 대상 트레이너 로그 디렉터리가 사전에 생성되지 않아 디렉터리 부재 시 tee 자체가
+  실패할 수 있던 결함(sync-auditor FAIL F3)을 수정한다. 마운트 게이트 뒤·tee 앞에 mkdir -p를 추가한다.
+
+SPEC: SPEC-ANALYZER-TRAIN-OBSV-001
+
+M1~M6 unit 레벨 구현 + sync-auditor binding FAIL 4건(F1/F2/F4 critical, F3 major) 후속 수정을 포함해 main에 머지·
+  v0.11.0으로 릴리스했다. AC-ATO-001~021 중 19건 PASS, 2건(AC-ATO-006 물리 저장소 동일성, AC-ATO-016 vector 파싱
+  보존)은 네트워크 접근이 필요한 M7 라이브 검증으로 위임된 PASS-WITH-DEBT 상태다 — M7은 이 SPEC의 M1~M6 완료를
+  블로킹하지 않는 후속 DoD 항목이며 아직 미착수다.
+
 ## v0.1.0 (2026-07-04)
 
 ### Other
