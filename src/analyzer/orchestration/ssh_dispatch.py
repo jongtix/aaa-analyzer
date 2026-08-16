@@ -343,6 +343,7 @@ def build_remote_dispatch_command(
     quoted_run_id = shlex.quote(run_id)
     trainer_log_path = trainer_log_base_dir / f"trainer_{run_id}.log"
     quoted_trainer_log_path = shlex.quote(str(trainer_log_path))
+    quoted_trainer_log_base_dir = shlex.quote(str(trainer_log_base_dir))
 
     tunnel_command = (
         f"ssh -f -N -o BatchMode=yes -o ExitOnForwardFailure=yes "
@@ -353,6 +354,10 @@ def build_remote_dispatch_command(
     )
     mount_command = quoted_mount_script_path
     train_command = (
+        # F3: mkdir -p로 트레이너 로그 디렉터리를 tee보다 먼저 생성한다 —
+        # promote_staging_to_active()의 mkdir -p 관례와 동일하게, 디렉터리가
+        # 없으면 원격 tee 자체가 실패해 트레이너 파일이 기록되지 않는다.
+        f"mkdir -p {quoted_trainer_log_base_dir} && "
         f"MYSQL_HOST=127.0.0.1 MYSQL_PORT={db_tunnel_local_port} "
         f"MYSQL_DATABASE={quoted_mysql_database} "
         f"MYSQL_TRAINER_PASSWORD={quoted_mysql_trainer_password} "

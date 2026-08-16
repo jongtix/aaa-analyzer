@@ -537,7 +537,11 @@ class TestBuildRemoteDispatchCommand:
             run_id="run-13",
         )
 
-        assert "/custom/mount.sh && MYSQL_HOST=127.0.0.1" in command
+        # F3: mount 게이트 다음에 mkdir -p(트레이너 로그 디렉터리 생성)가
+        # 끼어들며, 그 뒤로 학습 CLI가 이어진다 — 게이트 자체(마운트 실패 시
+        # 학습 CLI 미실행)는 변하지 않는다.
+        assert "/custom/mount.sh && mkdir -p " in command
+        assert "&& MYSQL_HOST=127.0.0.1" in command
         assert "/python -m analyzer.training.train" in command
 
     def test_mount_script_path_is_shlex_quoted(self):
@@ -623,6 +627,32 @@ class TestBuildRemoteDispatchCommand:
         )
 
         assert shlex.quote("/logs dir/analyzer/trainer_run-16.log") in command
+
+    def test_trainer_log_directory_is_mkdir_p_before_tee(self):
+        """F3(REQ-ATO-004/005): `promote_staging_to_active()`의 `mkdir -p`
+        관례와 동일하게, 트레이너 로그 디렉터리도 `tee` 전에 생성돼야 한다 —
+        디렉터리가 없으면 tee가 실패해 트레이너 파일이 기록되지 않는다."""
+        command = build_remote_dispatch_command(
+            staging_models_root=Path("/staging/run-1"),
+            calendar_code="KRX",
+            cache_dir=Path("/cache"),
+            data_as_of=date(2026, 8, 11),
+            feature_code_version="v1",
+            db_tunnel_host="nas-host",
+            db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-17",
+        )
+
+        expected_mkdir = f"mkdir -p {shlex.quote('/logs/analyzer')}"
+        assert expected_mkdir in command
+        mkdir_index = command.index(expected_mkdir)
+        tee_index = command.index("| tee ")
+        assert mkdir_index < tee_index
 
     def test_includes_train_run_id_env_var(self):
         """AC-ATO-008(REQ-ATO-012/013): NAS에서 발급된 run_id가 원격 CLI로
