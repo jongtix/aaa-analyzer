@@ -110,6 +110,10 @@ M1~M6 unit 레벨 구현 + sync-auditor binding FAIL 4건(F1/F2/F4 critical, F3 
   보존)은 네트워크 접근이 필요한 M7 라이브 검증으로 위임된 PASS-WITH-DEBT 상태다 — M7은 이 SPEC의 M1~M6 완료를
   블로킹하지 않는 후속 DoD 항목이며 아직 미착수다.
 
+M7 라이브 검증 완료(2026-08-16): 실제 원격 학습 재실행(run_id=81c88e4be3734c1a94d0520a4252625b, 16개 모델
+  전부 exit_code=0 + staging→active 승격)으로 AC-ATO-006(트레이너 파일 물리 저장소 동일성)·AC-ATO-016(XGBoost
+  stderr vector 파싱 보존)을 라이브 확인해 PASS로 전환했다. AC-ATO-001~021 전건 PASS.
+
 ## v0.1.0 (2026-07-04)
 
 ### Other
