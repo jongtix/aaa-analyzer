@@ -8,12 +8,12 @@ dependencies = [
   "fastapi>=0.141.1",
   "uvicorn[standard]>=0.52.1",
   "pymysql>=1.1",
-  "sqlalchemy>=2.0",
+  "sqlalchemy>=2.0.52",
   "apscheduler>=3,<4",
   "prometheus-client>=0.26.0",
   "pandas>=3.0.5",
-  "pyarrow>=19.0",
-  "numpy>=2.4",
+  "pyarrow>=25.0.1",
+  "numpy>=2.5.2",
   "scikit-learn>=1.9.0",
   "lightgbm>=4.7.0",
   "xgboost>=3.4.0",
@@ -24,7 +24,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-  "ruff>=0.16.2",
+  "ruff>=0.16.3",
   "pyright>=1.1.390",
   "pytest>=8.3",
   "pytest-cov>=6.0",
@@ -34,7 +34,7 @@ dev = [
 # 실행 시점에 직접 설치한다(PSR 공식 uv_integration 가이드 패턴). Dependabot
 # uv 생태계가 이 핀을 자동 갱신한다.
 build = [
-  "uv~=0.12.3",
+  "uv~=0.12.4",
 ]
 
 [build-system]
