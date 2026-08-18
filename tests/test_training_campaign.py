@@ -256,13 +256,19 @@ class TestRunWalkForwardCampaignAssemblesDatasetOncePerMarket:
 
 
 class TestMainCli:
+    """M6 Part 0: `main()`은 `run_walk_forward_campaign_and_activate()`를
+    호출하도록 배선이 갱신되었다(1차 배포까지 end-to-end 연결) — 신규
+    `--summary-report-path` 인자가 추가되었다."""
+
     def test_main_returns_0_on_success(self, tmp_path: Path):
         with (
             patch.object(campaign_module, "build_trainer_engine", return_value=MagicMock()),
             patch.object(
                 campaign_module,
-                "run_walk_forward_campaign",
-                return_value=campaign_module.CampaignResult(success=True),
+                "run_walk_forward_campaign_and_activate",
+                return_value=campaign_module.CampaignActivationResult(
+                    campaign_result=campaign_module.CampaignResult(success=True)
+                ),
             ),
         ):
             exit_code = main(
@@ -277,6 +283,8 @@ class TestMainCli:
                     "v1",
                     "--optuna-storage-dir",
                     str(tmp_path / "optuna"),
+                    "--summary-report-path",
+                    str(tmp_path / "summary.md"),
                 ]
             )
 
@@ -287,8 +295,10 @@ class TestMainCli:
             patch.object(campaign_module, "build_trainer_engine", return_value=MagicMock()),
             patch.object(
                 campaign_module,
-                "run_walk_forward_campaign",
-                return_value=campaign_module.CampaignResult(success=False, error="boom"),
+                "run_walk_forward_campaign_and_activate",
+                return_value=campaign_module.CampaignActivationResult(
+                    campaign_result=campaign_module.CampaignResult(success=False, error="boom")
+                ),
             ),
         ):
             exit_code = main(
@@ -303,7 +313,117 @@ class TestMainCli:
                     "v1",
                     "--optuna-storage-dir",
                     str(tmp_path / "optuna"),
+                    "--summary-report-path",
+                    str(tmp_path / "summary.md"),
                 ]
             )
 
         assert exit_code == 1
+
+
+class TestPart0IntegrationWiring:
+    """M6 Part 0: 캠페인 실행 후 `campaign_metrics.py`(JSONL/사이드카)와
+    `stabilization.py`(안정화 게이트 + 챔피언 선정)가 실제로 배선되어
+    호출됨을 확인한다 — M4 산출물이 M5 산출물과 순환 의존 없이 연결됨."""
+
+    def test_activate_market_horizon_combo_writes_jsonl_and_invokes_stabilization(
+        self, tmp_path: Path
+    ):
+        panel = _make_synthetic_panel(n_dates=260, n_stocks=2)
+        frozen_params_by_algorithm = {
+            "lightgbm": {"n_estimators": 10},
+            "xgboost": {"n_estimators": 10},
+        }
+        records = run_campaign_for_market_horizon(
+            panel,
+            market="domestic",
+            horizon=20,
+            initial_train_end_idx=150,
+            n_folds=15,
+            frozen_params_by_algorithm=frozen_params_by_algorithm,
+        )
+        assert len(records) == 15
+
+        models_root = tmp_path / "models"
+        jsonl_dir = models_root / "domestic" / "20"
+
+        with (
+            patch.object(
+                campaign_module.stabilization,
+                "evaluate_combo_stabilization",
+                wraps=campaign_module.stabilization.evaluate_combo_stabilization,
+            ) as stab_spy,
+            patch.object(
+                campaign_module.stabilization,
+                "select_champion_strategy",
+                wraps=campaign_module.stabilization.select_champion_strategy,
+            ) as champ_spy,
+        ):
+            outcome = campaign_module.activate_market_horizon_combo(
+                panel=panel,
+                market="domestic",
+                horizon=20,
+                fold_records=records,
+                jsonl_dir=jsonl_dir,
+                models_root=models_root,
+                initial_train_end_idx=150,
+                n_folds=15,
+                frozen_params_by_algorithm=frozen_params_by_algorithm,
+                trained_date=date(2026, 8, 17),
+            )
+
+        # stabilization.py의 안정화 게이트 함수가 실제로(lgbm+xgb) 2회 호출됨.
+        assert stab_spy.call_count == 2
+        champ_spy.assert_called_once()
+
+        # campaign_metrics.py의 JSONL 스트림 3개(lgbm/xgb/ensemble)가 실제로
+        # 생성되고 15줄씩 기록됨(12개 스트림 중 이 (시장,horizon) 조합분 3개).
+        for algorithm in ("lightgbm", "xgboost", "ensemble"):
+            jsonl_path = jsonl_dir / campaign_module.campaign_metrics.fold_metrics_jsonl_filename(
+                "domestic", 20, algorithm
+            )
+            assert jsonl_path.exists()
+            lines = jsonl_path.read_text(encoding="utf-8").strip().splitlines()
+            assert len(lines) == 15
+
+        assert isinstance(outcome, campaign_module.ComboActivationOutcome)
+        assert outcome.market == "domestic"
+        assert outcome.horizon == 20
+
+    def test_deployment_prohibited_combo_skips_persistence_and_manifest(self, tmp_path: Path):
+        """REQ-ATE-047: 안정화 미통과(자격 있는 전략 0개)면 어떤 형태로도
+        배포하지 않는다 — 모델 파일/사이드카/활성화 매니페스트 미생성."""
+        panel = _make_synthetic_panel(n_dates=260, n_stocks=2)
+        frozen_params_by_algorithm = {
+            "lightgbm": {"n_estimators": 5},
+            "xgboost": {"n_estimators": 5},
+        }
+        records = run_campaign_for_market_horizon(
+            panel,
+            market="domestic",
+            horizon=20,
+            initial_train_end_idx=150,
+            n_folds=3,  # 롤링 윈도우(12주/52주) 미충족 — 모든 게이트 FAIL 유도
+            frozen_params_by_algorithm=frozen_params_by_algorithm,
+        )
+        models_root = tmp_path / "models"
+
+        outcome = campaign_module.activate_market_horizon_combo(
+            panel=panel,
+            market="domestic",
+            horizon=20,
+            fold_records=records,
+            jsonl_dir=models_root / "domestic" / "20",
+            models_root=models_root,
+            initial_train_end_idx=150,
+            n_folds=3,
+            frozen_params_by_algorithm=frozen_params_by_algorithm,
+            trained_date=date(2026, 8, 17),
+        )
+
+        assert outcome.champion_selection.deployment_prohibited is True
+        assert outcome.persisted_algorithms == ()
+        # 모델 파일이 전혀 생성되지 않아야 한다(models_root 자체는 jsonl로
+        # 인해 생성되었을 수 있으나, algorithm 서브디렉토리는 없어야 한다).
+        assert not (models_root / "domestic" / "20" / "lightgbm").exists()
+        assert not (models_root / "domestic" / "20" / "xgboost").exists()

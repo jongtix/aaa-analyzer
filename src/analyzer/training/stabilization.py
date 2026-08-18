@@ -39,6 +39,12 @@ CAMPAIGN_GATE3_ICIR_FLOOR: float = 0.10
 """GATE-3 롤링 ICIR 임계값(REQ-ATE-043) — Qlib 벤치마크는 참고 맥락일 뿐
 직접 합격선 동등 비교로 취급하지 않는다."""
 
+PROMOTION_GATE_MIN_IMPROVEMENT: float = 0.0
+"""M6(REQ-ATE-057/061): 상시 챔피언/챌린저 게이트 승격에 필요한 최소 Rank IC
+개선폭(허용오차 겸용) — `promotion_gate.py`가 소비한다. 캠페인 안정화
+임계값(GATE-1/2/3, 위)과 동일한 설정 소스(이 모듈)에 정의해 단일 소스
+원칙(REQ-ATE-061)을 충족한다."""
+
 _GATE1_NAME = "GATE-1"
 _GATE2_NAME = "GATE-2"
 _GATE3_NAME = "GATE-3"
@@ -68,6 +74,16 @@ def _rolling_icir(values: Sequence[float], window: int) -> float | None:
     mean = statistics.fmean(tail)
     stddev = statistics.pstdev(tail) if len(tail) > 1 else 0.0
     return mean / stddev if stddev else 0.0
+
+
+def rolling_mean_rank_ic(
+    rank_ic_values: Sequence[float], *, rolling_weeks: int = CAMPAIGN_GATE1_ROLLING_WEEKS
+) -> float | None:
+    """GATE-1과 동일한 롤링 평균 Rank IC 정의를 외부(campaign.py 등)에 노출하는
+    공개 래퍼(REQ-ATE-045) — `select_champion_strategy()`의
+    `strategy_rolling_mean_rank_ic` 인자를 구성하는 호출자가, GATE-1과 동일한
+    롤링 집계 정의로 산출된 지표값을 얻기 위해 재사용한다."""
+    return _rolling_mean(rank_ic_values, rolling_weeks)
 
 
 def gate1_passed(

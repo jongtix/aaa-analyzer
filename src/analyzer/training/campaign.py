@@ -40,7 +40,7 @@ REQ-ATE-023/024/025/026/076: `python -m analyzer.training.campaign`
 import argparse
 import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -56,6 +56,9 @@ from sqlalchemy.engine import Engine
 from analyzer.common.logging import get_logger
 from analyzer.data.repository import fetch_market_calendar
 from analyzer.labels.config import PURGE_GAP_TRADING_DAYS
+from analyzer.orchestration import activation as activation_module
+from analyzer.training import campaign_metrics, stabilization
+from analyzer.training import persistence as persistence_module
 from analyzer.training import train as train_module
 from analyzer.training.backtest import BacktestMetrics, compute_backtest_metrics
 from analyzer.training.db import build_trainer_engine
@@ -536,6 +539,422 @@ def run_walk_forward_campaign(
         return CampaignResult(success=False, error=str(exc))
 
 
+CAMPAIGN_TRAINED_DATE_DEFAULT_SOURCE = "data_as_of"
+"""M6 Part 0: 챔피언 최종 재학습 아티팩트의 `trained_date`는 캠페인의
+`data_as_of`(전체 이력 조립의 컷오프 날짜)를 그대로 사용한다 — 개별 폴드의
+`val_end`가 아니라, 캠페인 실행 시점 자체를 아티팩트 버전으로 기록한다."""
+
+
+def append_fold_records_to_jsonl(
+    jsonl_dir: Path, market: str, horizon: int, records: Sequence[MarketHorizonFoldRecord]
+) -> None:
+    """M6 Part 0(REQ-ATE-038): (시장,horizon) 조합의 폴드 기록 전체를
+    포인트(lgbm/xgb) + 앙상블 3개 JSONL 스트림에 append한다 —
+    `campaign_metrics.append_fold_metrics()`(M4, 시그니처 무수정)를 그대로
+    소비한다."""
+    for record in records:
+        campaign_metrics.append_fold_metrics(
+            jsonl_dir,
+            market,
+            horizon,
+            "lightgbm",
+            record.fold_index,
+            record.train_end,
+            record.val_start,
+            record.val_end,
+            record.lightgbm_metrics,
+        )
+        campaign_metrics.append_fold_metrics(
+            jsonl_dir,
+            market,
+            horizon,
+            "xgboost",
+            record.fold_index,
+            record.train_end,
+            record.val_start,
+            record.val_end,
+            record.xgboost_metrics,
+        )
+        campaign_metrics.append_fold_metrics(
+            jsonl_dir,
+            market,
+            horizon,
+            campaign_metrics.ENSEMBLE_ALGORITHM_TAG,
+            record.fold_index,
+            record.train_end,
+            record.val_start,
+            record.val_end,
+            record.ensemble_metrics,
+        )
+
+
+def _final_fold_train_window(
+    panel: pd.DataFrame,
+    horizon: int,
+    initial_train_end_idx: int,
+    n_folds: int,
+    val_size: int = CAMPAIGN_VAL_SIZE_TRADING_DAYS,
+) -> pd.DataFrame:
+    """M6 Part 0(REQ-ATE-030): 캠페인의 마지막(가장 최근 데이터를 포함하는)
+    폴드의 학습 구간 데이터를 반환한다 — 챔피언 1차 배포 최종 재학습용."""
+    trade_dates = extract_global_trade_date_axis(panel)
+    index_bounds_list = weekly_stride_fold_index_bounds(
+        n_dates=len(trade_dates),
+        horizon=horizon,
+        initial_train_end=initial_train_end_idx,
+        val_size=val_size,
+        n_folds=n_folds,
+    )
+    last_bounds = index_bounds_list[-1]
+    date_bounds = map_index_bounds_to_dates(last_bounds, trade_dates)
+    train_df, _val_df = slice_panel_by_date_bounds(panel, date_bounds)
+    return train_df
+
+
+def train_and_persist_champion_artifact(
+    panel: pd.DataFrame,
+    market: str,
+    horizon: int,
+    algorithm: str,
+    initial_train_end_idx: int,
+    n_folds: int,
+    frozen_params: Mapping[str, Any],
+    models_root: Path,
+    trained_date: date,
+    val_size: int = CAMPAIGN_VAL_SIZE_TRADING_DAYS,
+) -> tuple[persistence_module.SavedModel, list[str], int]:
+    """M6 Part 0(REQ-ATE-030): 챔피언으로 선정된 (시장,horizon,algorithm)
+    조합을 캠페인이 검증한 동결 하이퍼파라미터로 마지막 폴드 학습 구간(최신
+    데이터 포함) 재학습하고 `persistence.save_model_native()`로 저장한다
+    — 캠페인이 검증한 것과 동일한 하이퍼파라미터로 배포한다(REQ-ATE-030,
+    학습-서빙 불일치 방지). 폴드 순회 자체(`run_campaign_for_market_horizon`)는
+    이 재학습된 모델을 저장하지 않는다(REQ-ATE-037 무관 — 이 함수는 별도의
+    단일 최종 재학습이다).
+    """
+    train_df = _final_fold_train_window(panel, horizon, initial_train_end_idx, n_folds, val_size)
+    feature_columns, x_train, y_train = train_module._split_features_and_labels(train_df, horizon)
+    model = _fit_point_model(algorithm, frozen_params, x_train.to_numpy(), y_train.to_numpy())
+    saved = persistence_module.save_model_native(
+        model, models_root, market, horizon, algorithm, trained_date
+    )
+    return saved, feature_columns, len(x_train)
+
+
+@dataclass(frozen=True, slots=True)
+class ComboActivationOutcome:
+    """M6 Part 0: (시장,horizon) 조합 1개의 안정화 판정 + 챔피언 선정 +
+    (배포 가능 시) 활성화 결과를 담는다 — 캠페인 요약 리포트(REQ-ATE-034)와
+    self-verification 근거로 함께 소비된다."""
+
+    market: str
+    horizon: int
+    lightgbm_verdict: stabilization.ComboStabilizationVerdict
+    xgboost_verdict: stabilization.ComboStabilizationVerdict
+    champion_selection: stabilization.ChampionSelection
+    persisted_algorithms: tuple[str, ...] = ()
+
+
+def activate_market_horizon_combo(
+    *,
+    panel: pd.DataFrame,
+    market: str,
+    horizon: int,
+    fold_records: Sequence[MarketHorizonFoldRecord],
+    jsonl_dir: Path,
+    models_root: Path,
+    initial_train_end_idx: int,
+    n_folds: int,
+    frozen_params_by_algorithm: Mapping[str, Mapping[str, Any]],
+    trained_date: date,
+    val_size: int = CAMPAIGN_VAL_SIZE_TRADING_DAYS,
+) -> ComboActivationOutcome:
+    """M6 Part 0/Part 1 통합 배선: 폴드 기록 → 안정화 판정(GATE-1/2/3, M5) →
+    챔피언 스코어링 전략 선정(F1) → (배포 가능 시) 최종 재학습+저장(REQ-ATE-030)
+    + 사이드카(REQ-ATE-031/032/033) + 활성화 매니페스트(§2.9, REQ-ATE-052
+    1차 배포 경로) + 스코어링 전략 매니페스트(REQ-ATE-050) 갱신까지 1회
+    (시장,horizon) 조합 전체를 처리한다.
+    """
+    append_fold_records_to_jsonl(jsonl_dir, market, horizon, fold_records)
+
+    lgbm_rank_ic = [r.lightgbm_metrics.rank_ic for r in fold_records]
+    xgb_rank_ic = [r.xgboost_metrics.rank_ic for r in fold_records]
+    ensemble_rank_ic = [r.ensemble_metrics.rank_ic for r in fold_records]
+
+    lgbm_verdict = stabilization.evaluate_combo_stabilization(
+        market, horizon, "lightgbm", lgbm_rank_ic
+    )
+    xgb_verdict = stabilization.evaluate_combo_stabilization(
+        market, horizon, "xgboost", xgb_rank_ic
+    )
+
+    strategy_rolling_mean_rank_ic: dict[str, float] = {
+        "lightgbm": stabilization.rolling_mean_rank_ic(lgbm_rank_ic) or float("-inf"),
+        "xgboost": stabilization.rolling_mean_rank_ic(xgb_rank_ic) or float("-inf"),
+        "ensemble": stabilization.rolling_mean_rank_ic(ensemble_rank_ic) or float("-inf"),
+    }
+    champion_selection = stabilization.select_champion_strategy(
+        market, horizon, lgbm_verdict, xgb_verdict, strategy_rolling_mean_rank_ic
+    )
+
+    if champion_selection.deployment_prohibited:
+        return ComboActivationOutcome(
+            market=market,
+            horizon=horizon,
+            lightgbm_verdict=lgbm_verdict,
+            xgboost_verdict=xgb_verdict,
+            champion_selection=champion_selection,
+            persisted_algorithms=(),
+        )
+
+    # REQ-ATE-046: 챔피언이 앙상블이면 lgbm+xgb 둘 다, 단독이면 그 알고리즘만
+    # 활성화 매니페스트 대상으로 유지한다(반대편 미안정화 알고리즘은 제외).
+    if champion_selection.champion_algorithm == "ensemble":
+        algorithms_to_persist: tuple[str, ...] = ("lightgbm", "xgboost")
+    else:
+        assert champion_selection.champion_algorithm is not None
+        algorithms_to_persist = (champion_selection.champion_algorithm,)
+
+    verdict_by_algorithm = {"lightgbm": lgbm_verdict, "xgboost": xgb_verdict}
+    aggregate_metrics_by_algorithm = {
+        "lightgbm": campaign_metrics.compute_aggregate_metrics(lgbm_rank_ic),
+        "xgboost": campaign_metrics.compute_aggregate_metrics(xgb_rank_ic),
+    }
+
+    persisted: list[str] = []
+    for algorithm in algorithms_to_persist:
+        saved, feature_columns, final_fold_row_count = train_and_persist_champion_artifact(
+            panel,
+            market,
+            horizon,
+            algorithm,
+            initial_train_end_idx,
+            n_folds,
+            frozen_params_by_algorithm[algorithm],
+            models_root,
+            trained_date,
+            val_size=val_size,
+        )
+        jsonl_relative_path = campaign_metrics.fold_metrics_jsonl_filename(
+            market, horizon, algorithm
+        )
+        campaign_metrics.write_sidecar_metadata(
+            saved.model_path,
+            market=market,
+            horizon=horizon,
+            algorithm=algorithm,
+            aggregate_metrics=aggregate_metrics_by_algorithm[algorithm],
+            final_fold_train_row_count=final_fold_row_count,
+            frozen_hyperparameters=frozen_params_by_algorithm[algorithm],
+            feature_columns=feature_columns,
+            fold_metrics_jsonl_relative_path=jsonl_relative_path,
+        )
+        this_verdict = verdict_by_algorithm[algorithm]
+        activation_module.promote_activation_manifest(
+            models_root,
+            market=market,
+            horizon=horizon,
+            algorithm=algorithm,
+            merged_to_active=True,
+            gate_passed=True,
+            trained_date=trained_date,
+            sidecar_sha256=saved.sha256,
+            promotion_basis={
+                "path": "initial_deployment",
+                "gate1_rolling_mean_rank_ic": this_verdict.gate1_rolling_mean_rank_ic,
+                "gate2_mean_rank_ic": this_verdict.gate2_mean_rank_ic,
+                "gate3_rolling_icir": this_verdict.gate3_rolling_icir,
+            },
+        )
+        persisted.append(algorithm)
+
+    activation_module.write_strategy_manifest(
+        models_root,
+        market=market,
+        horizon=horizon,
+        active_strategy=champion_selection.champion_algorithm,
+        basis={"eligible_strategies": list(champion_selection.eligible_strategies)},
+    )
+
+    return ComboActivationOutcome(
+        market=market,
+        horizon=horizon,
+        lightgbm_verdict=lgbm_verdict,
+        xgboost_verdict=xgb_verdict,
+        champion_selection=champion_selection,
+        persisted_algorithms=tuple(persisted),
+    )
+
+
+def _combo_verdict_stub(
+    outcome: ComboActivationOutcome,
+) -> list[campaign_metrics.ComboGateVerdictStub]:
+    """M6 Part 0(REQ-ATE-034): M4가 정의한 스텁 구조(시그니처 무수정)를 실제
+    안정화 판정 데이터로 채워 캠페인 요약 리포트에 반영한다."""
+    stubs: list[campaign_metrics.ComboGateVerdictStub] = []
+    for algorithm, verdict in (
+        ("lightgbm", outcome.lightgbm_verdict),
+        ("xgboost", outcome.xgboost_verdict),
+    ):
+        stubs.append(
+            campaign_metrics.ComboGateVerdictStub(
+                market=outcome.market,
+                horizon=outcome.horizon,
+                algorithm=algorithm,
+                gate_verdict="stabilized" if verdict.stabilized else "not_stabilized",
+                supporting_metrics={
+                    "gate1_passed": verdict.gate1_passed,
+                    "gate2_passed": verdict.gate2_passed,
+                    "gate3_passed": verdict.gate3_passed,
+                    "gate1_rolling_mean_rank_ic": verdict.gate1_rolling_mean_rank_ic,
+                    "gate2_mean_rank_ic": verdict.gate2_mean_rank_ic,
+                    "gate3_rolling_icir": verdict.gate3_rolling_icir,
+                },
+            )
+        )
+    stubs.append(
+        campaign_metrics.ComboGateVerdictStub(
+            market=outcome.market,
+            horizon=outcome.horizon,
+            algorithm="champion_selection",
+            gate_verdict=(
+                "deployment_prohibited"
+                if outcome.champion_selection.deployment_prohibited
+                else f"champion={outcome.champion_selection.champion_algorithm}"
+            ),
+            supporting_metrics={
+                "eligible_strategies": list(outcome.champion_selection.eligible_strategies),
+                "persisted_algorithms": list(outcome.persisted_algorithms),
+                "diagnostics": dict(outcome.champion_selection.diagnostics),
+            },
+        )
+    )
+    return stubs
+
+
+@dataclass(frozen=True, slots=True)
+class CampaignActivationResult:
+    """`run_walk_forward_campaign_and_activate()`의 최종 결과 — 캠페인 실행
+    결과(`CampaignResult`) + (시장,horizon) 조합별 활성화 결과."""
+
+    campaign_result: CampaignResult
+    activation_outcomes: dict[tuple[str, int], ComboActivationOutcome] = field(default_factory=dict)
+    summary_report_path: Path | None = None
+
+
+def run_walk_forward_campaign_and_activate(
+    *,
+    trainer_engine: Engine,
+    calendar_code: str,
+    cache_dir: Path,
+    models_root: Path,
+    data_as_of: date,
+    feature_code_version: str,
+    optuna_storage_dir: Path,
+    summary_report_path: Path,
+    oos_span_years: int = CAMPAIGN_OOS_EVALUATION_SPAN_YEARS,
+    optuna_trials: int = CAMPAIGN_OPTUNA_TRIALS,
+    val_size: int = CAMPAIGN_VAL_SIZE_TRADING_DAYS,
+    timeout_hours: float = CAMPAIGN_TIMEOUT_HOURS,
+) -> CampaignActivationResult:
+    """M6 Part 0 최상위 진입점: `run_walk_forward_campaign()`(M3, 골격) 실행
+    직후 각 (시장,horizon) 조합에 대해 `activate_market_horizon_combo()`를
+    호출해 JSONL 영속화(M4) + 안정화 판정/챔피언 선정(M5) + 1차 배포
+    활성화(M6 §2.9)까지 end-to-end로 연결한다. `panels`는 재구성하지 않고
+    `run_walk_forward_campaign()` 내부에서 조립된 데이터를 재사용하기 위해,
+    이 함수는 그 함수를 감싸는 대신 동일한 흐름을 인라인으로 재현한다
+    (패널을 캠페인 실행 후에도 활성화 단계에서 재사용해야 하므로 —
+    `run_walk_forward_campaign()`은 패널을 반환하지 않는다).
+    """
+    deadline = time.monotonic() + timeout_hours * 3600
+
+    panels: dict[str, pd.DataFrame] = {}
+    for market in MARKETS:
+        panels[market] = _assemble_campaign_dataset(
+            trainer_engine, market, cache_dir, data_as_of, feature_code_version, calendar_code
+        )
+
+    frozen_params: dict[tuple[str, int, str], dict[str, Any]] = {}
+    for market, horizon, algorithm in POINT_COMBOS:
+        frozen_params[(market, horizon, algorithm)] = tune_initial_history_hyperparameters(
+            panels[market],
+            market,
+            horizon,
+            algorithm,
+            optuna_storage_dir,
+            trial_count=optuna_trials,
+            oos_span_years=oos_span_years,
+        )
+
+    records_by_market_horizon: dict[tuple[str, int], list[MarketHorizonFoldRecord]] = {}
+    errors_by_market_horizon: dict[tuple[str, int], str] = {}
+    activation_outcomes: dict[tuple[str, int], ComboActivationOutcome] = {}
+    all_stubs: list[campaign_metrics.ComboGateVerdictStub] = []
+
+    for market in MARKETS:
+        panel = panels[market]
+        trade_dates = extract_global_trade_date_axis(panel)
+        initial_train_end_idx = _initial_train_end_index(len(trade_dates), oos_span_years)
+        n_folds = _resolve_evaluation_fold_count(len(trade_dates), initial_train_end_idx, val_size)
+        for horizon in HORIZONS:
+            try:
+                records = run_campaign_for_market_horizon(
+                    panel,
+                    market,
+                    horizon,
+                    initial_train_end_idx,
+                    n_folds,
+                    frozen_params_by_algorithm={
+                        "lightgbm": frozen_params[(market, horizon, "lightgbm")],
+                        "xgboost": frozen_params[(market, horizon, "xgboost")],
+                    },
+                    val_size=val_size,
+                    timeout_deadline=deadline,
+                )
+                records_by_market_horizon[(market, horizon)] = records
+
+                outcome = activate_market_horizon_combo(
+                    panel=panel,
+                    market=market,
+                    horizon=horizon,
+                    fold_records=records,
+                    jsonl_dir=models_root / market / str(horizon),
+                    models_root=models_root,
+                    initial_train_end_idx=initial_train_end_idx,
+                    n_folds=n_folds,
+                    frozen_params_by_algorithm={
+                        "lightgbm": frozen_params[(market, horizon, "lightgbm")],
+                        "xgboost": frozen_params[(market, horizon, "xgboost")],
+                    },
+                    trained_date=data_as_of,
+                    val_size=val_size,
+                )
+                activation_outcomes[(market, horizon)] = outcome
+                all_stubs.extend(_combo_verdict_stub(outcome))
+            except Exception as exc:  # noqa: BLE001 — 조합 단위 격리(AC-ATE-008)
+                logger.error(
+                    "campaign combo failed market=%s horizon=%s: %s",
+                    market,
+                    horizon,
+                    exc,
+                    exc_info=True,
+                )
+                errors_by_market_horizon[(market, horizon)] = str(exc)
+
+    campaign_metrics.write_campaign_summary_report(summary_report_path, all_stubs)
+
+    campaign_result = CampaignResult(
+        success=True,
+        records_by_market_horizon=records_by_market_horizon,
+        frozen_params=frozen_params,
+        errors_by_market_horizon=errors_by_market_horizon,
+    )
+    return CampaignActivationResult(
+        campaign_result=campaign_result,
+        activation_outcomes=activation_outcomes,
+        summary_report_path=summary_report_path,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI 진입점 — 성공 시 `0`, 실패 시 `1`을 반환한다(REQ-ATE-023/024).
 
@@ -550,22 +969,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--data-as-of", type=date.fromisoformat, required=True)
     parser.add_argument("--feature-code-version", required=True)
     parser.add_argument("--optuna-storage-dir", type=Path, required=True)
+    parser.add_argument("--summary-report-path", type=Path, required=True)
     args = parser.parse_args(argv)
-    # `--models-root`는 챔피언 최종 폴드 아티팩트 저장 경로용으로 예약되어
-    # 있다(M4/M5/M6 소관, REQ-ATE-031) — 이 골격 마일스톤은 아직 소비하지 않는다.
 
     engine = build_trainer_engine()
 
-    result = run_walk_forward_campaign(
+    activation_result = run_walk_forward_campaign_and_activate(
         trainer_engine=engine,
         calendar_code=args.calendar_code,
         cache_dir=args.cache_dir,
+        models_root=args.models_root,
         data_as_of=args.data_as_of,
         feature_code_version=args.feature_code_version,
         optuna_storage_dir=args.optuna_storage_dir,
+        summary_report_path=args.summary_report_path,
     )
-    if not result.success:
-        print(f"캠페인 실패: {result.error}", file=sys.stderr)
+    if not activation_result.campaign_result.success:
+        print(f"캠페인 실패: {activation_result.campaign_result.error}", file=sys.stderr)
         return 1
     return 0
 
