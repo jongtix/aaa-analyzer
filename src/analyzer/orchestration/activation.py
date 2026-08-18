@@ -140,6 +140,12 @@ def promote_activation_manifest(
     이 함수 하나를 공유한다. 조건을 만족하지 않으면 쓰기 없이 `None`을
     반환한다(병합 성공만으로 매니페스트가 갱신되지 않음, AC-ATE-038 4번째
     시나리오).
+
+    @MX:ANCHOR: [AUTO] 활성화 매니페스트의 유일한 쓰기 경로 — 1차 배포
+    (campaign.py `activate_market_horizon_combo()`)와 상시 게이트
+    (promotion_gate.py `evaluate_and_promote()`) 양쪽이 이 함수를 공유한다.
+    @MX:REASON: fan_in >= 2, 서빙 대상 모델을 가리키는 유일한 진실원(SSOT)을
+    갱신하는 지점이므로 우회 경로가 생기면 활성화 상태 불일치가 발생한다.
     """
     if not (merged_to_active and gate_passed):
         return None
@@ -170,6 +176,13 @@ def rollback_activation_manifest(
     정책이 이미 최근 12개 버전을 active 경로에 보존하므로, 되돌릴 대상
     파일이 항상 존재한다). `target_sidecar_sha256`은 호출자가 롤백 대상
     버전의 사이드카에서 직접 조회해 전달한다(이 함수는 파일을 읽지 않음).
+
+    @MX:WARN: [AUTO] 배포 롤백 경로 — 활성 서빙 대상을 가리키는 상태를
+    되돌리는 유일한 함수. 잘못된 `target_sidecar_sha256`을 전달하면
+    실제 아티팩트와 매니페스트가 불일치한 상태로 롤백될 수 있다.
+    @MX:REASON: 호출자가 파일 시스템 대신 대상 버전의 사이드카를 직접
+    조회해 전달해야 하는 계약(REQ-ATE-053)이며, 이 계약을 어기면
+    무결성 검증 없이 서빙 대상이 전환된다.
     """
     existing = read_activation_manifest(models_root, market, horizon, algorithm)
     if existing is None:
