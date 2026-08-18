@@ -114,6 +114,29 @@ def _make_synthetic_panel(n_dates: int, n_stocks: int = 1, seed: int = 42) -> pd
     return pd.concat(frames, ignore_index=True)
 
 
+class TestComputeFoldEnsembleDegenerateQuantileFallback:
+    """리뷰 지적사항: `_compute_fold_ensemble()`의 축퇴 분위수 분포
+    (p10==p90) 폴백 confidence=0.5 분기가 기존에 테스트 커버리지가
+    없었다(src/analyzer/training/campaign.py `_compute_fold_ensemble`).
+    프로덕션 폴백 로직 자체는 수정하지 않는다(테스트 공백 보완만)."""
+
+    def test_degenerate_quantile_row_falls_back_to_neutral_confidence(self):
+        # 0번 행: p10==p90(축퇴, sigma=0) → ensemble.compute_confidence()가
+        # ValueError를 내며, _compute_fold_ensemble()이 이를 잡아 0.5로 대체.
+        # 1번 행: 정상 분위수 분포(비교 대조군).
+        lgbm_preds = np.array([0.5, 0.1])
+        xgb_preds = np.array([0.3, 0.1])
+        p10_preds = np.array([0.2, 0.2])
+        p90_preds = np.array([0.2, 0.4])
+
+        _, confidences = campaign_module._compute_fold_ensemble(
+            lgbm_preds, xgb_preds, p10_preds, p90_preds
+        )
+
+        assert confidences[0] == 0.5
+        assert confidences[1] != 0.5
+
+
 class TestConstantsAndPointCombos:
     def test_named_constants_match_spec_initial_values(self):
         assert CAMPAIGN_OOS_EVALUATION_SPAN_YEARS == 10
