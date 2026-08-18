@@ -19,7 +19,7 @@ SSH 종료코드 0 확인 후에만 호출되며, 그 외 모든 경로(WoL 실�
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal
@@ -29,6 +29,7 @@ from analyzer.common.trace import reset_trace_id, set_trace_id
 from analyzer.orchestration.config import AutomationConfig
 from analyzer.orchestration.failure import TrainingRunFailure, handle_training_run_failure
 from analyzer.orchestration.metrics import TrainingMetrics
+from analyzer.orchestration.promotion_gate import PromotionVerdict
 from analyzer.orchestration.ssh_dispatch import (
     SshConnection,
     build_remote_dispatch_command,
@@ -89,6 +90,8 @@ def execute_scheduled_training_run(
     ssh_retry_interval_seconds: float = 10.0,
     sleep_fn: Callable[[float], None] = time.sleep,
     time_fn: Callable[[], float] = time.time,
+    promotion_gate_fn: Callable[[bool], Mapping[tuple[str, int, str], PromotionVerdict]]
+    | None = None,
 ) -> RunOutcome:
     """REQ-ATA-010~062: WoL → 30초 대기(REQ-ATA-020) → SSH 연결(재시도 포함) →
     원격 디스패치(터널 수립 내장) → 완료 감지(종료코드) → 프로모션/실패처리까지
@@ -103,6 +106,16 @@ def execute_scheduled_training_run(
     `set_trace_id(run_id)`로 활성 Trace ID를 설정하고 함수 종료(성공/실패/
     타임아웃 무관) 시 반환된 토큰으로 복원한다 — 동시 실행 중인 무관한
     컨텍스트로 값이 새어나가지 않게 한다.
+
+    REQ-ATE-055(M6): 종료코드 0(SSH 성공)만으로 자동 승격을 기록하지 않는다
+    — `promotion_gate_fn`이 주어지면(1차 배포 이후), `promote_staging_to_active()`
+    성공 여부(`promoted`)를 인자로 호출해 조합별 `PromotionVerdict` 매핑을
+    받고, REQ-ATE-064/065에 따라 그 매핑에 있는 각 (시장,horizon,algorithm)
+    조합마다 개별적으로 `record_success(outcome=...)`를 호출한다("success"=
+    승격, "held-back"=보류). `promotion_gate_fn`이 `None`이면(1차 배포 이전,
+    §B 리스크 6 — 활성 챔피언이 아직 없어 챌린저 개념이 성립하지 않는 상태)
+    기존처럼 이 함수에 전달된 단일 (market,horizon,algorithm)에 대해서만
+    `record_success(outcome="success")`를 호출한다(하위 호환).
     """
     trace_id_token = set_trace_id(run_id)
     try:
@@ -215,9 +228,45 @@ def execute_scheduled_training_run(
                 run_id,
                 extra={"stage_marker": True},
             )
-            metrics.record_success(
-                market=market, horizon=horizon, algorithm=algorithm, timestamp=time_fn()
-            )
+
+            if promotion_gate_fn is None:
+                # §B 리스크 6: 활성 챔피언이 아직 없는 1차 배포 이전 상태 —
+                # 상시 게이트(§2.10) 경로를 호출하지 않는다.
+                metrics.record_success(
+                    market=market, horizon=horizon, algorithm=algorithm, timestamp=time_fn()
+                )
+                return RunOutcome(success=True, promoted=promoted)
+
+            # REQ-ATE-055/064/065: 조합별 승격/보류 판정 → 조합마다 개별
+            # record_success(outcome=...) 호출. record_success 자체(카운터
+            # 증가 + Rank IC 게이지, REQ-ATE-060/066)가 기존 알림 채널
+            # (Prometheus → vmalert → 텔레그램, REQ-ATA-060/061)의 트리거
+            # 시그널이다 — 별도 알림 함수를 새로 호출하지 않는다.
+            verdicts = promotion_gate_fn(promoted)
+            for (v_market, v_horizon, v_algorithm), verdict in verdicts.items():
+                outcome = "success" if verdict.promoted else "held-back"
+                metrics.record_success(
+                    market=v_market,
+                    horizon=v_horizon,
+                    algorithm=v_algorithm,
+                    timestamp=time_fn(),
+                    outcome=outcome,
+                )
+                metrics.record_rank_ic(
+                    market=v_market,
+                    horizon=v_horizon,
+                    algorithm=v_algorithm,
+                    rank_ic=verdict.challenger_rank_ic,
+                )
+                _logger.info(
+                    "promotion gate outcome market=%s horizon=%s algorithm=%s outcome=%s run_id=%s",
+                    v_market,
+                    v_horizon,
+                    v_algorithm,
+                    outcome,
+                    run_id,
+                    extra={"stage_marker": True},
+                )
             return RunOutcome(success=True, promoted=promoted)
 
         finally:

@@ -11,6 +11,7 @@ from prometheus_client import CollectorRegistry, generate_latest
 from analyzer.orchestration.metrics import (
     LAST_SUCCESS_TIMESTAMP_NAME,
     MODEL_STALE_NAME,
+    RANK_IC_NAME,
     TRAINING_RUN_TOTAL_NAME,
     TrainingMetrics,
 )
@@ -95,6 +96,102 @@ class TestTrainingMetricsStaleness:
             MODEL_STALE_NAME, {"market": "overseas", "horizon": "20", "algorithm": "xgboost"}
         )
         assert value == 0.0
+
+
+class TestTrainingMetricsOutcomeAwareRecordSuccess:
+    """M6(REQ-ATE-064/065): `record_success()`가 outcome 레이블(success/
+    held-back)로 카운터를 구분 증가시킨다 — held-back은 게이지를 갱신하지
+    않는다(기존 챔피언이 계속 서빙 중이므로 "마지막 성공"을 갱신할 근거 없음)."""
+
+    def test_outcome_success_increments_counter_and_updates_gauge(self):
+        registry = CollectorRegistry()
+        metrics = TrainingMetrics(registry=registry)
+
+        metrics.record_success(
+            market="domestic",
+            horizon=20,
+            algorithm="lightgbm",
+            timestamp=1000.0,
+            outcome="success",
+        )
+
+        counter_value = registry.get_sample_value(
+            TRAINING_RUN_TOTAL_NAME, {"stage": "success", "outcome": "success"}
+        )
+        gauge_value = registry.get_sample_value(
+            LAST_SUCCESS_TIMESTAMP_NAME,
+            {"market": "domestic", "horizon": "20", "algorithm": "lightgbm"},
+        )
+        assert counter_value == 1.0
+        assert gauge_value == 1000.0
+
+    def test_outcome_held_back_increments_counter_but_not_gauge(self):
+        registry = CollectorRegistry()
+        metrics = TrainingMetrics(registry=registry)
+
+        metrics.record_success(
+            market="domestic",
+            horizon=20,
+            algorithm="xgboost",
+            timestamp=2000.0,
+            outcome="held-back",
+        )
+
+        counter_value = registry.get_sample_value(
+            TRAINING_RUN_TOTAL_NAME, {"stage": "success", "outcome": "held-back"}
+        )
+        gauge_value = registry.get_sample_value(
+            LAST_SUCCESS_TIMESTAMP_NAME,
+            {"market": "domestic", "horizon": "20", "algorithm": "xgboost"},
+        )
+        assert counter_value == 1.0
+        assert gauge_value is None  # 게이지가 아예 갱신되지 않았어야 한다.
+
+    def test_default_outcome_is_success_backward_compatible(self):
+        """기존 호출자(`outcome` 미지정)는 outcome="success"로 하위 호환된다."""
+        registry = CollectorRegistry()
+        metrics = TrainingMetrics(registry=registry)
+
+        metrics.record_success(market="domestic", horizon=20, algorithm="lightgbm", timestamp=1.0)
+
+        counter_value = registry.get_sample_value(
+            TRAINING_RUN_TOTAL_NAME, {"stage": "success", "outcome": "success"}
+        )
+        assert counter_value == 1.0
+
+
+class TestTrainingMetricsRankIcGauge:
+    """REQ-ATE-066(M6): (시장,horizon,algorithm)별 Rank IC 게이지 — 8개
+    조합 각각에 대해 독립적인 레이블 조합으로 관측 가능해야 한다(AC-ATE-051)."""
+
+    def test_record_rank_ic_sets_gauge_per_combo(self):
+        registry = CollectorRegistry()
+        metrics = TrainingMetrics(registry=registry)
+
+        combos = [
+            ("domestic", 20, "lightgbm", 0.03),
+            ("domestic", 20, "xgboost", 0.025),
+            ("domestic", 60, "lightgbm", -0.01),
+            ("overseas", 20, "lightgbm", 0.02),
+            ("overseas", 20, "xgboost", 0.015),
+            ("overseas", 60, "lightgbm", 0.04),
+            ("overseas", 60, "xgboost", 0.05),
+            ("domestic", 60, "xgboost", 0.06),
+        ]
+        for market, horizon, algorithm, rank_ic in combos:
+            metrics.record_rank_ic(
+                market=market, horizon=horizon, algorithm=algorithm, rank_ic=rank_ic
+            )
+
+        for market, horizon, algorithm, rank_ic in combos:
+            value = registry.get_sample_value(
+                RANK_IC_NAME,
+                {"market": market, "horizon": str(horizon), "algorithm": algorithm},
+            )
+            assert value == rank_ic
+
+    def test_rank_ic_gauge_follows_existing_naming_convention(self):
+        assert RANK_IC_NAME.startswith("aaa_analyzer_training_")
 
 
 class TestPrometheusScrapeSmoke:

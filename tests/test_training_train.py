@@ -204,6 +204,96 @@ class TestRunTrainingPipelineOrchestration:
         assert result.saved_model_paths == [Path("/tmp/a.txt")]
         assert result.error is None
 
+    def test_saved_combos_field_defaults_empty_and_is_additive(self):
+        """REQ-ATE-063(M6): 신규 필드는 additive — 기존 `saved_model_paths`만
+        지정한 생성 경로가 그대로 동작하고 `saved_combos`는 빈 리스트 기본값."""
+        result = TrainingPipelineResult(success=True, saved_model_paths=[Path("/tmp/a.txt")])
+
+        assert result.saved_combos == []
+        # 기존 필드 타입/의미는 이 확장 전후로 불변이어야 한다(REQ-ATE-063).
+        assert result.saved_model_paths == [Path("/tmp/a.txt")]
+
+    def test_saved_combos_populated_with_deduped_market_horizon_algorithm_tuples(
+        self, tmp_path: Path
+    ):
+        """REQ-ATE-062/064: `run_training_pipeline()`이 저장한 각 (시장,horizon,
+        algorithm) 조합을 구조화된 필드로 반환한다 — 분위수 보조 모델
+        (`lightgbm_quantile`)은 포인트 LightGBM과 동일한 algorithm="lightgbm"
+        으로 해석되므로 동일 조합이 중복 없이 1회만 나타나야 한다."""
+        model = MagicMock()
+        model.spec = lgb.LGBMRegressor  # isinstance 체크 통과용
+
+        def _fake_train_pooled_models(*args, **kwargs):
+            models: dict[tuple, object] = {}
+            for m in MARKETS:
+                for h in HORIZONS:
+                    models[(m, h, "lightgbm")] = MagicMock(spec=lgb.LGBMRegressor)
+                    models[(m, h, "xgboost")] = MagicMock()
+                    for alpha in (0.10, 0.90):
+                        models[(m, h, "lightgbm_quantile", alpha)] = MagicMock(
+                            spec=lgb.LGBMRegressor
+                        )
+            return models
+
+        def _fake_save_model_native(model, models_root, market, horizon, algorithm, trained_date):
+            from analyzer.training.persistence import SavedModel
+
+            path = tmp_path / f"{market}_{horizon}_{algorithm}.bin"
+            return SavedModel(model_path=path, sidecar_path=path, sha256="deadbeef")
+
+        def _fake_save_quantile_model(model, models_root, market, horizon, alpha, trained_date):
+            from analyzer.training.persistence import SavedModel
+
+            path = tmp_path / f"{market}_{horizon}_lightgbm_q{alpha}.bin"
+            return SavedModel(model_path=path, sidecar_path=path, sha256="deadbeef")
+
+        with (
+            patch.object(
+                train_module,
+                "fetch_market_calendar",
+                return_value=TradingCalendar(calendar_code="KRX", trading_days=frozenset()),
+            ),
+            patch.object(
+                train_module,
+                "fetch_stock_universe",
+                return_value=pd.DataFrame({"stock_code": [], "grade": [], "delisted_at": []}),
+            ),
+            patch.object(train_module, "fetch_market_data", return_value=({}, {}, {})),
+            patch.object(
+                train_module.cache_module,
+                "assemble_dataset_cached",
+                return_value=_dummy_assembled_dataset(),
+            ),
+            patch.object(
+                train_module, "train_pooled_models", side_effect=_fake_train_pooled_models
+            ),
+            patch.object(
+                train_module.persistence_module,
+                "save_model_native",
+                side_effect=_fake_save_model_native,
+            ),
+            patch.object(
+                train_module, "_save_quantile_model", side_effect=_fake_save_quantile_model
+            ),
+        ):
+            result = run_training_pipeline(
+                trainer_engine=MagicMock(),
+                calendar_code="KRX",
+                cache_dir=tmp_path / "cache",
+                models_root=tmp_path / "models",
+                data_as_of=date(2026, 8, 8),
+                feature_code_version="v1",
+            )
+
+        assert result.success is True
+        expected_combos = {
+            (m, h, algo) for m in MARKETS for h in HORIZONS for algo in ("lightgbm", "xgboost")
+        }
+        assert set(result.saved_combos) == expected_combos
+        # 8 포인트 조합(중복 없음) — 분위수 보조 모델이 별도 조합으로
+        # 이중 계산되지 않았음을 확인.
+        assert len(result.saved_combos) == len(expected_combos)
+
 
 class TestFetchStockUniverseMarketCodeMapping:
     """`stocks.market`은 거래소 코드(KOSPI/KOSDAQ/NYSE/NASDAQ/AMEX)로 저장된다

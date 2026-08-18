@@ -23,6 +23,11 @@ from prometheus_client import REGISTRY, CollectorRegistry, Counter, Gauge
 TRAINING_RUN_TOTAL_NAME = "aaa_analyzer_training_run_total"
 LAST_SUCCESS_TIMESTAMP_NAME = "aaa_analyzer_training_run_last_success_timestamp_seconds"
 MODEL_STALE_NAME = "aaa_analyzer_model_stale"
+RANK_IC_NAME = "aaa_analyzer_training_rank_ic"
+"""REQ-ATE-066(M6): (시장,horizon,algorithm) 조합별 Rank IC(§2.8/§2.10 1차
+평가 지표) 게이지 이름 — 기존 `aaa_analyzer_training_run_*` 명명 관례를
+따른다. 이 게이지를 소비하는 vmalert 알람 규칙은 이 SPEC의 책임이 아니다
+(REQ-ATE-066 shall not, REQ-ATA-071 원칙 계승)."""
 
 
 class TrainingMetrics:
@@ -54,15 +59,38 @@ class TrainingMetrics:
             ["market", "horizon", "algorithm"],
             registry=target_registry,
         )
+        self.rank_ic = Gauge(
+            RANK_IC_NAME,
+            "조합별 Rank IC(1차 평가 지표, §2.8/§2.10)",
+            ["market", "horizon", "algorithm"],
+            registry=target_registry,
+        )
 
     def record_success(
-        self, *, market: str, horizon: int, algorithm: str, timestamp: float
+        self,
+        *,
+        market: str,
+        horizon: int,
+        algorithm: str,
+        timestamp: float,
+        outcome: str = "success",
     ) -> None:
-        """AC-ATA-001: 성공 경로 — 카운터 증가 + 마지막 성공 시각 갱신."""
-        self.training_run_total.labels(stage="success", outcome="success").inc()
-        self.last_success_timestamp.labels(
-            market=market, horizon=str(horizon), algorithm=algorithm
-        ).set(timestamp)
+        """AC-ATA-001 + REQ-ATE-064/065(M6): 성공 경로 카운터를 `outcome`
+        레이블로 구분해 증가시킨다 — `outcome="success"`(승격)일 때만 마지막
+        성공 시각 게이지를 갱신한다. `outcome="held-back"`(보류)은 카운터만
+        증가시키고 게이지는 갱신하지 않는다(보류된 조합은 기존 챔피언이
+        계속 서빙 중이므로 "마지막 성공"을 갱신할 근거가 없다). 기존
+        호출자(1차 배포 이전, `outcome` 미지정)는 `outcome="success"` 기본값으로
+        하위 호환된다."""
+        self.training_run_total.labels(stage="success", outcome=outcome).inc()
+        if outcome == "success":
+            self.last_success_timestamp.labels(
+                market=market, horizon=str(horizon), algorithm=algorithm
+            ).set(timestamp)
+
+    def record_rank_ic(self, *, market: str, horizon: int, algorithm: str, rank_ic: float) -> None:
+        """REQ-ATE-066: (시장,horizon,algorithm) 조합별 Rank IC 게이지를 갱신한다."""
+        self.rank_ic.labels(market=market, horizon=str(horizon), algorithm=algorithm).set(rank_ic)
 
     def record_failure(self, *, stage: str) -> None:
         """REQ-ATA-060/061: WoL/SSH/학습스크립트/타임아웃 4종 실패를 동일한
