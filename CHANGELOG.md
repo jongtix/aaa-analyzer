@@ -1,6 +1,36 @@
 # CHANGELOG
 
 
+## v0.12.0 (2026-08-18)
+
+### ✨
+
+- ✨ feat(SPEC-ANALYZER-TRAIN-EVAL-001): 역사적 Walk-Forward 캠페인 평가 + 안정화 게이트 + 상시 챔피언/챌린저 게이트 도입
+  ([`f6823a9`](https://github.com/jongtix/aaa-analyzer/commit/f6823a99a02ecaf224eee78b592af33076b92716)..
+  [`61f5c7d`](https://github.com/jongtix/aaa-analyzer/commit/61f5c7d50ea0ba81eaa4aa69085e2bf18974668b))
+
+배포 전 다중 폴드 표본외 성능 검증과 배포 후 상시 게이트를 도입한다 — 프로덕션 동작 자체는 변경하지 않으며,
+`SPEC-ANALYZER-TRAIN-001`이 구현했지만 호출자가 없던(orphaned) `split.py`/`backtest.py`/`ensemble.py`의
+순수 함수를 실제로 배선한 오프라인 검증/배포 계층이다.
+
+- `data_as_of` 상한이 실제 학습 데이터 조회를 제한하지 않던 결함과 분위수 보조 모델 8개의 파일명 충돌 결함을
+  수정한다(REQ-ATE-001~010).
+- 국내 2005-01-01/해외 2007-08-20부터 현재까지 주간(weekly) 표본외 윈도우로 확장 폴드를 구성해 시장×horizon×
+  algorithm 8개 포인트 조합 각각의 표본외 성능(7개 백테스트 지표)을 측정하는 역사적 Walk-Forward 캠페인을
+  신설한다(신규 CLI `python -m analyzer.training.campaign`, cron 미등록, REQ-ATE-011~038).
+- 폴드 지표 시계열에 롤링 집계 기반 기계적 안정화 게이트(GATE-1/2/3)를 적용하고, 통과한 조합에 대해 LightGBM/
+  XGBoost/앙상블 스코어링 전략 중 챔피언을 선정한다(REQ-ATE-039~047).
+- 증거 기반 1차 배포(활성화 매니페스트 + 롤백 가능 스킴)와, 이후 주간 재학습을 챌린저로 취급하는 오프라인
+  챔피언/챌린저 상시 게이트를 도입한다. `record_success()`를 조합 단위로 수정하고 Prometheus 모델 품질
+  Rank IC 게이지를 추가한다(REQ-ATE-048~076).
+
+신규 MySQL 스키마·env var·마이그레이션 없음. Breaking API change 없음(`TrainingPipelineResult`는 additive
+확장만). 신규 파일: `training/panel_folds.py`, `training/campaign.py`, `training/campaign_metrics.py`,
+`training/stabilization.py`, `orchestration/activation.py`, `orchestration/promotion_gate.py`.
+
+SPEC: SPEC-ANALYZER-TRAIN-EVAL-001
+
+
 ## v0.11.0 (2026-08-16)
 
 ### ✨
