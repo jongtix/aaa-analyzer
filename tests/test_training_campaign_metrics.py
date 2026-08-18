@@ -125,6 +125,9 @@ class TestAppendFoldMetricsJsonl:
         train_end = pd.Timestamp("2026-01-01")
         val_start = pd.Timestamp("2026-01-08")
         val_end = pd.Timestamp("2026-01-15")
+        assert isinstance(train_end, pd.Timestamp)
+        assert isinstance(val_start, pd.Timestamp)
+        assert isinstance(val_end, pd.Timestamp)
 
         for fold_index in range(3):
             append_fold_metrics(
@@ -163,14 +166,19 @@ class TestAppendFoldMetricsJsonl:
             }
 
     def test_none_val_end_serializes_to_null(self, tmp_path: Path):
+        train_end = pd.Timestamp("2026-01-01")
+        val_start = pd.Timestamp("2026-01-08")
+        assert isinstance(train_end, pd.Timestamp)
+        assert isinstance(val_start, pd.Timestamp)
+
         append_fold_metrics(
             tmp_path,
             "domestic",
             20,
             "lightgbm",
             0,
-            pd.Timestamp("2026-01-01"),
-            pd.Timestamp("2026-01-08"),
+            train_end,
+            val_start,
             None,
             _metrics(),
         )
@@ -189,6 +197,9 @@ class TestFiveHundredFoldSimulationScale:
         train_end = pd.Timestamp("2016-01-04")
         val_start = pd.Timestamp("2016-01-11")
         val_end = pd.Timestamp("2016-01-18")
+        assert isinstance(train_end, pd.Timestamp)
+        assert isinstance(val_start, pd.Timestamp)
+        assert isinstance(val_end, pd.Timestamp)
 
         rank_ics: list[float] = []
         for fold_index in range(500):
