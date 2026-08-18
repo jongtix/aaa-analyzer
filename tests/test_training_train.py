@@ -457,3 +457,195 @@ class TestQuantileModelFilenameCollision:
         # 스테이징 임시 디렉토리가 최종 트리에 잔존하지 않아야 한다.
         leftover_dirs = [p for p in tmp_path.iterdir() if p.name.startswith("tmp")]
         assert leftover_dirs == []
+
+
+class TestSplitFeaturesAndLabelsFeatureAllowlist:
+    """AC-ATE-053(REQ-ATE-074): 피처 컬럼 목록은 FEATURE_REGISTRY.keys()와
+    assembled.columns의 교집합과 정확히 일치해야 하며, 원시 OHLCV 컬럼은
+    배제되어야 한다."""
+
+    def test_raw_ohlcv_columns_excluded_from_feature_columns(self):
+        from analyzer.features.classification import FEATURE_REGISTRY
+
+        n = 30
+        assembled = pd.DataFrame(
+            {
+                "stock_code": ["A1"] * n,
+                "trade_date": [date(2026, 1, i + 1) for i in range(n)],
+                "open_price": [100.0] * n,
+                "high_price": [101.0] * n,
+                "low_price": [99.0] * n,
+                "close_price": [100.5] * n,
+                "volume": [1000] * n,
+                "KMID": [0.01] * n,
+                "ROC_5": [0.02] * n,
+                "label_D20": [0.03] * n,
+                "label_D20_exclude_reason": [None] * n,
+                "label_D60": [0.04] * n,
+                "label_D60_exclude_reason": [None] * n,
+            }
+        )
+
+        feature_columns, x, _y = train_module._split_features_and_labels(assembled, horizon=20)
+
+        assert set(feature_columns) == {"KMID", "ROC_5"}
+        assert "open_price" not in feature_columns
+        assert "high_price" not in feature_columns
+        assert "low_price" not in feature_columns
+        assert "close_price" not in feature_columns
+        assert "volume" not in feature_columns
+        assert "stock_code" not in feature_columns
+        assert "trade_date" not in feature_columns
+        assert set(feature_columns) == set(assembled.columns) & set(FEATURE_REGISTRY.keys())
+        assert set(x.columns) == set(feature_columns)
+
+    def test_partial_coverage_combo_only_includes_present_registry_columns(self):
+        """REQ-AT-064: 해외 종목처럼 일부 FEATURE_REGISTRY 키가 assembled.columns에
+        존재하지 않는 조합에서도, 교집합 로직이 자연스럽게 존재하는 컬럼만 반환한다."""
+        n = 10
+        assembled = pd.DataFrame(
+            {
+                "stock_code": ["OS1"] * n,
+                "trade_date": [date(2026, 1, i + 1) for i in range(n)],
+                "close_price": [50.0] * n,
+                "KMID": [0.01] * n,
+                # 수급 피처(foreign_net_ratio 등)는 존재하지 않음 — 해외 결측 시뮬레이션
+                "label_D20": [0.02] * n,
+            }
+        )
+
+        feature_columns, _x, _y = train_module._split_features_and_labels(assembled, horizon=20)
+
+        assert feature_columns == ["KMID"]
+
+
+class TestTruncateThenRecomputeEquivalence:
+    """AC-ATE-054(REQ-ATE-075, design.md §3.4): 전체 패널을 조립한 뒤 T로
+    슬라이스한 피처와, 원주가 자체를 T로 먼저 절단한 뒤 재조립한 피처가
+    동일해야 한다 — point-in-time 불변식(후행 롤링 윈도우만 사용) 검증.
+
+    합성 데이터는 기업이벤트(SPLIT/DIVIDEND)를 포함하지 않는다 — 이렇게
+    하면 adjust_prices()의 as_of_date 의존성(design.md §3.3의 알려진
+    한계, 캠페인 실행일 기준 소급 조정)이 개입하지 않고, 순수하게
+    compute_technical_features()의 point-in-time 불변식만 격리해 검증할
+    수 있다."""
+
+    @staticmethod
+    def _empty_events() -> pd.DataFrame:
+        return pd.DataFrame(
+            columns=[
+                "event_type",
+                "event_date",
+                "stock_rate",
+                "cash_amount",
+                "event_subtype",
+                "ex_dividend_date",
+                "currency_code",
+            ]
+        )
+
+    @staticmethod
+    def _weekdays(start: date, end: date) -> list[date]:
+        from datetime import timedelta
+
+        days: list[date] = []
+        current = start
+        while current <= end:
+            if current.weekday() < 5:
+                days.append(current)
+            current += timedelta(days=1)
+        return days
+
+    def _ohlcv(self, stock_code: str, dates: list[date], seed: int) -> pd.DataFrame:
+        import numpy as np
+
+        rng = np.random.default_rng(seed)
+        n = len(dates)
+        base = 100.0 + np.cumsum(rng.normal(scale=0.5, size=n))
+        return pd.DataFrame(
+            {
+                "stock_code": [stock_code] * n,
+                "trade_date": dates,
+                "open_price": base,
+                "high_price": base + 1.0,
+                "low_price": base - 1.0,
+                "close_price": base + 0.2,
+                "volume": rng.integers(1000, 5000, size=n),
+            }
+        )
+
+    def test_technical_features_identical_before_and_after_truncation(self):
+        from analyzer.data.models import TradingCalendar
+        from analyzer.training.dataset import assemble_dataset
+
+        full_start = date(2016, 1, 4)
+        full_end = date(2016, 12, 30)
+        truncate_at = date(2016, 6, 15)
+
+        all_dates = self._weekdays(full_start, full_end)
+        calendar = TradingCalendar(calendar_code="TEST", trading_days=frozenset(all_dates))
+
+        stocks = pd.DataFrame(
+            {
+                "stock_code": ["A1", "A2"],
+                "grade": ["A", "A"],
+                "delisted_at": [None, None],
+            }
+        )
+        full_ohlcv_by_stock = {
+            "A1": self._ohlcv("A1", all_dates, seed=1),
+            "A2": self._ohlcv("A2", all_dates, seed=2),
+        }
+        events_by_stock = {"A1": self._empty_events(), "A2": self._empty_events()}
+        investor_trend_by_stock: dict[str, pd.DataFrame] = {}
+
+        full_assembled = assemble_dataset(
+            stocks=stocks,
+            ohlcv_by_stock=full_ohlcv_by_stock,
+            events_by_stock=events_by_stock,
+            investor_trend_by_stock=investor_trend_by_stock,
+            calendar=calendar,
+            market="domestic",
+        )
+        full_sliced = full_assembled.loc[full_assembled["trade_date"] <= truncate_at]
+
+        truncated_ohlcv_by_stock = {
+            code: df.loc[df["trade_date"] <= truncate_at].reset_index(drop=True)
+            for code, df in full_ohlcv_by_stock.items()
+        }
+        truncated_assembled = assemble_dataset(
+            stocks=stocks,
+            ohlcv_by_stock=truncated_ohlcv_by_stock,
+            events_by_stock=events_by_stock,
+            investor_trend_by_stock=investor_trend_by_stock,
+            calendar=calendar,
+            market="domestic",
+        )
+
+        assert not full_sliced.empty
+        assert not truncated_assembled.empty
+
+        feature_columns, _x, _y = train_module._split_features_and_labels(full_sliced, horizon=20)
+        assert feature_columns  # sanity: FEATURE_REGISTRY 교집합이 비어있지 않아야 함
+
+        merged = full_sliced.merge(
+            truncated_assembled,
+            on=["stock_code", "trade_date"],
+            suffixes=("_full", "_truncated"),
+        )
+        assert len(merged) == len(full_sliced)
+
+        import numpy as np
+
+        for column in feature_columns:
+            full_values = merged[f"{column}_full"].to_numpy(dtype=float)
+            truncated_values = merged[f"{column}_truncated"].to_numpy(dtype=float)
+            # 두 계산 모두 초반(윈도 미충족) 구간에서 동일한 위치에 NaN을
+            # 산출해야 하므로 NaN을 서로 동일하다고 취급한다(equal_nan=True).
+            np.testing.assert_allclose(
+                full_values,
+                truncated_values,
+                atol=1e-9,
+                equal_nan=True,
+                err_msg=f"point-in-time invariant violated for feature: {column}",
+            )
