@@ -90,10 +90,20 @@ _STOCK_UNIVERSE_QUERY = text(
 
 @dataclass(frozen=True, slots=True)
 class TrainingPipelineResult:
-    """`run_training_pipeline()` 실행 결과 — CLI 종료코드 신호의 기반 데이터."""
+    """`run_training_pipeline()` 실행 결과 — CLI 종료코드 신호의 기반 데이터.
+
+    `saved_combos`(REQ-ATE-062/063, M6): 저장된 각 모델의 (시장, horizon,
+    algorithm) 식별자를 구조화된 형태로 담는다 — 파일 경로 파싱 없이
+    조합을 복원할 수 있게 하는 추가(additive) 필드다. 분위수 보조 모델
+    (`lightgbm_quantile`)은 저장용 algorithm이 포인트 LightGBM과 동일하게
+    "lightgbm"으로 해석되므로(`_resolve_algorithm()`), 동일 (시장,horizon,
+    "lightgbm") 조합이 포인트+분위수 두 번 저장되더라도 이 필드에는 중복
+    없이 1회만 나타난다. 기존 `saved_model_paths` 필드는 타입/의미 불변
+    (하위 호환, REQ-ATE-063)."""
 
     success: bool
     saved_model_paths: list[Path] = field(default_factory=list)
+    saved_combos: list[tuple[str, int, str]] = field(default_factory=list)
     error: str | None = None
 
 
@@ -334,6 +344,8 @@ def run_training_pipeline(
         )
 
         saved_paths: list[Path] = []
+        saved_combos: list[tuple[str, int, str]] = []
+        seen_combos: set[tuple[str, int, str]] = set()
         for model_key, model in trained_models.items():
             market, horizon = model_key[0], model_key[1]
             tag = model_key[2]
@@ -356,8 +368,14 @@ def run_training_pipeline(
                 extra={"stage_marker": True},
             )
             saved_paths.append(saved.model_path)
+            combo = (market, horizon, algorithm)
+            if combo not in seen_combos:
+                seen_combos.add(combo)
+                saved_combos.append(combo)
 
-        return TrainingPipelineResult(success=True, saved_model_paths=saved_paths)
+        return TrainingPipelineResult(
+            success=True, saved_model_paths=saved_paths, saved_combos=saved_combos
+        )
     except Exception as exc:  # noqa: BLE001 — 오케스트레이터 최상위 캐치-올(종료코드 신호 계약)
         # REQ-ATO-020: TrainingPipelineResult.error 반환 타입(문자열)은 그대로
         # 유지하되, 전체 traceback은 로그로 남긴다(exc_info=True).

@@ -17,9 +17,11 @@ from analyzer.common.trace import get_trace_id
 from analyzer.orchestration.config import AutomationConfig
 from analyzer.orchestration.metrics import (
     LAST_SUCCESS_TIMESTAMP_NAME,
+    RANK_IC_NAME,
     TRAINING_RUN_TOTAL_NAME,
     TrainingMetrics,
 )
+from analyzer.orchestration.promotion_gate import PromotionVerdict
 from analyzer.orchestration.runner import _make_stage_marker_relay, execute_scheduled_training_run
 from analyzer.orchestration.ssh_dispatch import CommandResult
 
@@ -448,6 +450,127 @@ class TestExecuteScheduledTrainingRunTunnelTeardown:
         )
 
         assert captured_timeouts[0] == config.monthly_timeout_seconds
+
+
+class TestExecuteScheduledTrainingRunPromotionGateWiring:
+    """M6(REQ-ATE-055/064/065): `promotion_gate_fn`이 주어지면 조합별 승격/
+    보류 판정에 따라 `record_success(outcome=...)`가 개별 호출되어야 한다 —
+    실행당 1회가 아니라 저장된 조합 수만큼(AC-ATE-049)."""
+
+    def test_records_success_and_held_back_per_combo_independently(self, tmp_path: Path):
+        config = _make_config(tmp_path)
+        wol = _FakeWolSender([True])
+        connection = _FakeConnection(
+            exec_results=[CommandResult(exit_code=0), CommandResult(exit_code=0)]
+        )
+        registry = CollectorRegistry()
+        metrics = TrainingMetrics(registry=registry)
+
+        verdicts = {
+            ("domestic", 20, "lightgbm"): PromotionVerdict(
+                market="domestic",
+                horizon=20,
+                algorithm="lightgbm",
+                promoted=True,
+                challenger_rank_ic=0.05,
+                champion_rank_ic=0.01,
+                challenger_trained_date=date(2026, 8, 17),
+            ),
+            ("domestic", 20, "xgboost"): PromotionVerdict(
+                market="domestic",
+                horizon=20,
+                algorithm="xgboost",
+                promoted=False,
+                challenger_rank_ic=0.0,
+                champion_rank_ic=0.02,
+                challenger_trained_date=date(2026, 8, 17),
+            ),
+        }
+        promotion_gate_calls: list[bool] = []
+
+        def _fake_promotion_gate_fn(merged: bool):
+            promotion_gate_calls.append(merged)
+            return verdicts
+
+        outcome = execute_scheduled_training_run(
+            run_kind="weekly",
+            run_id="run-promo-1",
+            market="domestic",
+            horizon=20,
+            algorithm="lightgbm",
+            data_as_of=date(2026, 8, 17),
+            config=config,
+            wol_sender=wol,
+            connection_factory=lambda: connection,
+            metrics=metrics,
+            sleep_fn=lambda _s: None,
+            time_fn=lambda: 5000.0,
+            promotion_gate_fn=_fake_promotion_gate_fn,
+        )
+
+        assert outcome.success is True
+        assert promotion_gate_calls == [True]  # promote_staging_to_active() 결과가 전달됨
+
+        success_value = registry.get_sample_value(
+            TRAINING_RUN_TOTAL_NAME, {"stage": "success", "outcome": "success"}
+        )
+        held_back_value = registry.get_sample_value(
+            TRAINING_RUN_TOTAL_NAME, {"stage": "success", "outcome": "held-back"}
+        )
+        assert success_value == 1.0
+        assert held_back_value == 1.0
+
+        promoted_gauge = registry.get_sample_value(
+            LAST_SUCCESS_TIMESTAMP_NAME,
+            {"market": "domestic", "horizon": "20", "algorithm": "lightgbm"},
+        )
+        held_back_gauge = registry.get_sample_value(
+            LAST_SUCCESS_TIMESTAMP_NAME,
+            {"market": "domestic", "horizon": "20", "algorithm": "xgboost"},
+        )
+        assert promoted_gauge == 5000.0
+        assert held_back_gauge is None
+
+        rank_ic_promoted = registry.get_sample_value(
+            RANK_IC_NAME, {"market": "domestic", "horizon": "20", "algorithm": "lightgbm"}
+        )
+        rank_ic_held_back = registry.get_sample_value(
+            RANK_IC_NAME, {"market": "domestic", "horizon": "20", "algorithm": "xgboost"}
+        )
+        assert rank_ic_promoted == 0.05
+        assert rank_ic_held_back == 0.0
+
+    def test_promotion_gate_fn_none_falls_back_to_single_combo_success(self, tmp_path: Path):
+        """`promotion_gate_fn`이 None이면(1차 배포 이전) 기존 단일-호출
+        동작으로 하위 호환된다."""
+        config = _make_config(tmp_path)
+        wol = _FakeWolSender([True])
+        connection = _FakeConnection(
+            exec_results=[CommandResult(exit_code=0), CommandResult(exit_code=0)]
+        )
+        registry = CollectorRegistry()
+        metrics = TrainingMetrics(registry=registry)
+
+        outcome = execute_scheduled_training_run(
+            run_kind="weekly",
+            run_id="run-promo-2",
+            market="domestic",
+            horizon=20,
+            algorithm="lightgbm",
+            data_as_of=date(2026, 8, 17),
+            config=config,
+            wol_sender=wol,
+            connection_factory=lambda: connection,
+            metrics=metrics,
+            sleep_fn=lambda _s: None,
+            time_fn=lambda: 42.0,
+        )
+
+        assert outcome.success is True
+        success_value = registry.get_sample_value(
+            TRAINING_RUN_TOTAL_NAME, {"stage": "success", "outcome": "success"}
+        )
+        assert success_value == 1.0
 
 
 class TestExecuteScheduledTrainingRunIdempotentWol:
