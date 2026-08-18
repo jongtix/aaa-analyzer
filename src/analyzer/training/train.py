@@ -53,6 +53,7 @@ from analyzer.data.repository import (
     fetch_investor_trend,
     fetch_market_calendar,
 )
+from analyzer.features.classification import FEATURE_REGISTRY
 from analyzer.training import cache as cache_module
 from analyzer.training import dataset as dataset_module
 from analyzer.training import persistence as persistence_module
@@ -208,12 +209,17 @@ def _assemble_market_dataset(
 def _split_features_and_labels(
     assembled: pd.DataFrame, horizon: int
 ) -> tuple[list[str], pd.DataFrame, pd.Series]:
-    """조립된 데이터셋에서 `horizon`의 유효 레이블 행만 골라 (feature 열, X, y)로 나눈다."""
-    feature_columns = [
-        c
-        for c in assembled.columns
-        if not c.startswith("label_") and c not in ("stock_code", "trade_date")
-    ]
+    """조립된 데이터셋에서 `horizon`의 유효 레이블 행만 골라 (feature 열, X, y)로 나눈다.
+
+    피처 컬럼은 `FEATURE_REGISTRY`(REQ-ATE-074, design.md §5.2)와
+    `assembled.columns`의 교집합으로 도출한다 — 원시 OHLCV 컬럼
+    (open_price/high_price/low_price/close_price/volume)과 `stock_code`/
+    `trade_date`는 `FEATURE_REGISTRY`에 등록되어 있지 않으므로 자동으로
+    제외된다. 일부 조합(예: 해외 종목의 수급 피처 결측, REQ-AT-064)은
+    40개 키 중 일부가 `assembled.columns`에 존재하지 않을 수 있으며,
+    교집합이므로 그 경우도 자연스럽게 처리된다.
+    """
+    feature_columns = [c for c in assembled.columns if c in FEATURE_REGISTRY]
     label_column = f"label_D{horizon}"
     valid = assembled.dropna(subset=[label_column])
     x: pd.DataFrame = valid.loc[:, feature_columns]
