@@ -30,12 +30,15 @@ SPEC의 PRESERVE 대상(plan.md §D, `_DB_USER`→`_ANALYZER_DB_USER` 리네임
 
 import argparse
 import os
+import shutil
 import sys
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
+import lightgbm as lgb
 import numpy as np
 import pandas as pd
 from sqlalchemy import bindparam, text
@@ -105,9 +108,13 @@ def fetch_stock_universe(engine: Engine, market: str) -> pd.DataFrame:
 
 
 def fetch_market_data(
-    engine: Engine, stocks: pd.DataFrame
+    engine: Engine, stocks: pd.DataFrame, data_as_of: date
 ) -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
     """유니버스 종목별로 원주가/이벤트/수급 데이터를 조회한다(`repository.py` 기존 함수 재사용).
+
+    `data_as_of` 상한을 `fetch_daily_ohlcv(..., end_date=data_as_of)`로 강제해,
+    조립된 데이터셋에 `data_as_of`보다 미래인 원주가 행이 섞이지 않게 한다
+    (REQ-ATE-001/002/003/005/006 — 학습 데이터 경계 결함 수정).
 
     반환된 세 딕셔너리는 `dataset.assemble_dataset()`이 요구하는
     `ohlcv_by_stock`/`events_by_stock`/`investor_trend_by_stock` 스키마와
@@ -119,7 +126,7 @@ def fetch_market_data(
 
     progress_batch: list[str] = []
     for stock_code in stocks["stock_code"]:
-        ohlcv_by_stock[stock_code] = fetch_daily_ohlcv(engine, stock_code)
+        ohlcv_by_stock[stock_code] = fetch_daily_ohlcv(engine, stock_code, end_date=data_as_of)
         events_by_stock[stock_code] = fetch_corporate_events(engine, stock_code)
         investor_trend_by_stock[stock_code] = fetch_investor_trend(engine, stock_code)
 
@@ -154,7 +161,9 @@ def _assemble_market_dataset(
         grade_counts,
         extra={"stage_marker": True},
     )
-    ohlcv_by_stock, events_by_stock, investor_trend_by_stock = fetch_market_data(engine, stocks)
+    ohlcv_by_stock, events_by_stock, investor_trend_by_stock = fetch_market_data(
+        engine, stocks, data_as_of
+    )
 
     def _assemble() -> pd.DataFrame:
         return dataset_module.assemble_dataset(
@@ -229,6 +238,51 @@ def _resolve_algorithm(model_key: tuple) -> str:
     return "lightgbm" if tag == "lightgbm_quantile" else tag
 
 
+def _quantile_model_filename(market: str, horizon: int, alpha: float, trained_date: date) -> str:
+    """분위수 보조 모델의 파일명 — 포인트 LightGBM 모델과 동일한 algorithm
+    세그먼트("lightgbm")·디렉토리를 공유하되, 파일명 세그먼트에 alpha 구분자를
+    추가해 충돌을 피한다(REQ-ATE-007/008/010).
+
+    `persistence.model_filename()`은 algorithm을 {"lightgbm","xgboost"} 두 키로만
+    검증하므로(`persistence.py` 무수정 유지, plan.md §D), 여기서는 그 함수가 만드는
+    포인트 모델용 이름을 그대로 얻은 뒤 alpha 태그만 사후 삽입한다 — 확장자는
+    변경하지 않는다.
+    """
+    base = persistence_module.model_filename(market, horizon, "lightgbm", trained_date)
+    stem, _, ext = base.rpartition(".")
+    alpha_tag = f"q{round(alpha * 100):02d}"
+    return f"{stem}_{alpha_tag}.{ext}"
+
+
+def _save_quantile_model(
+    model: lgb.LGBMRegressor,
+    models_root: Path,
+    market: str,
+    horizon: int,
+    alpha: float,
+    trained_date: date,
+) -> persistence_module.SavedModel:
+    """분위수 보조 모델을 저장한다 — `persistence.save_model_native()`(algorithm="lightgbm")를
+    임시 스테이징 디렉토리에서 호출해 SHA-256 라운드트립 검증(REQ-AT-092)을 그대로
+    재사용한 뒤, 포인트 모델의 실경로를 절대 건드리지 않고 alpha 접미사가 붙은
+    최종 파일명으로 옮긴다(REQ-ATE-007/008/009/010, AC-ATE-003).
+    """
+    models_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=models_root) as staging:
+        staged = persistence_module.save_model_native(
+            model, Path(staging), market, horizon, "lightgbm", trained_date
+        )
+        final_dir = persistence_module.model_dir(models_root, market, horizon, "lightgbm")
+        final_dir.mkdir(parents=True, exist_ok=True)
+        final_path = final_dir / _quantile_model_filename(market, horizon, alpha, trained_date)
+        final_sidecar = final_path.with_suffix(final_path.suffix + ".sha256")
+        shutil.move(str(staged.model_path), str(final_path))
+        shutil.move(str(staged.sidecar_path), str(final_sidecar))
+        return persistence_module.SavedModel(
+            model_path=final_path, sidecar_path=final_sidecar, sha256=staged.sha256
+        )
+
+
 def run_training_pipeline(
     *,
     trainer_engine: Engine,
@@ -276,10 +330,16 @@ def run_training_pipeline(
         saved_paths: list[Path] = []
         for model_key, model in trained_models.items():
             market, horizon = model_key[0], model_key[1]
+            tag = model_key[2]
             algorithm = _resolve_algorithm(model_key)
-            saved = persistence_module.save_model_native(
-                model, models_root, market, horizon, algorithm, data_as_of
-            )
+            if tag == "lightgbm_quantile":
+                alpha = model_key[3]
+                assert isinstance(model, lgb.LGBMRegressor)
+                saved = _save_quantile_model(model, models_root, market, horizon, alpha, data_as_of)
+            else:
+                saved = persistence_module.save_model_native(
+                    model, models_root, market, horizon, algorithm, data_as_of
+                )
             # REQ-ATO-019: 모델 저장 경로 단계 전이 로그.
             logger.info(
                 "model saved market=%s horizon=%s algorithm=%s path=%s",

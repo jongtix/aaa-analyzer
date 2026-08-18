@@ -10,6 +10,7 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import lightgbm as lgb
 import pandas as pd
 import pytest
 
@@ -342,3 +343,117 @@ class TestMainTraceIdPropagation:
             )
 
         assert exit_code == 0
+
+
+class TestFetchMarketDataDataAsOfBoundary:
+    """AC-ATE-001(REQ-ATE-001/002/003/005/006): fetch_market_data()가
+    data_as_of 상한을 fetch_daily_ohlcv(..., end_date=data_as_of)로 강제해야
+    한다 — 합성 미래 원주가 행이 조회 결과에서 배제됨을 확인한다."""
+
+    def test_passes_data_as_of_as_end_date_to_fetch_daily_ohlcv(self):
+        stocks = pd.DataFrame({"stock_code": ["A1", "B2"]})
+        captured_end_dates: list[date | None] = []
+
+        def _fake_fetch_daily_ohlcv(engine, stock_code, start_date=None, end_date=None):
+            captured_end_dates.append(end_date)
+            return pd.DataFrame({"trade_date": []})
+
+        with (
+            patch.object(train_module, "fetch_daily_ohlcv", side_effect=_fake_fetch_daily_ohlcv),
+            patch.object(train_module, "fetch_corporate_events", return_value=pd.DataFrame()),
+            patch.object(train_module, "fetch_investor_trend", return_value=pd.DataFrame()),
+        ):
+            train_module.fetch_market_data(MagicMock(), stocks, date(2026, 8, 10))
+
+        assert captured_end_dates == [date(2026, 8, 10), date(2026, 8, 10)]
+
+    def test_synthetic_future_rows_are_excluded_from_fetched_result(self):
+        """AC-ATE-001 Given-When-Then을 그대로 구현: 종목 A의 daily_ohlcv에
+        2026-08-01~2026-08-20 원주가가 있고 data_as_of=2026-08-10이면, 조립된
+        결과의 종목 A 행 중 trade_date > 2026-08-10인 행이 0건이어야 한다."""
+        stocks = pd.DataFrame({"stock_code": ["A1"]})
+        full_history = pd.DataFrame(
+            {
+                "trade_date": [date(2026, 8, d) for d in range(1, 21)],
+                "close_price": list(range(20)),
+            }
+        )
+
+        def _fake_fetch_daily_ohlcv(engine, stock_code, start_date=None, end_date=None):
+            df = full_history
+            if end_date is not None:
+                df = df[df["trade_date"] <= end_date]
+            return df.reset_index(drop=True)
+
+        with (
+            patch.object(train_module, "fetch_daily_ohlcv", side_effect=_fake_fetch_daily_ohlcv),
+            patch.object(train_module, "fetch_corporate_events", return_value=pd.DataFrame()),
+            patch.object(train_module, "fetch_investor_trend", return_value=pd.DataFrame()),
+        ):
+            ohlcv_by_stock, _, _ = train_module.fetch_market_data(
+                MagicMock(), stocks, date(2026, 8, 10)
+            )
+
+        assembled = ohlcv_by_stock["A1"]
+        assert (assembled["trade_date"] > date(2026, 8, 10)).sum() == 0
+        assert len(assembled) == 10
+
+
+class TestQuantileModelFilenameCollision:
+    """AC-ATE-003(REQ-ATE-007/008/010): 동일 (시장,horizon) 조합의 포인트
+    LightGBM 모델 + 분위수 보조 모델(alpha=0.10) + 분위수 보조 모델(alpha=0.90)
+    3개가 서로 다른 파일 경로에 저장되고, persistence.py의 실제
+    save_model_native()(무수정)를 그대로 재사용해 각 파일이 저장 직후
+    SHA-256 라운드트립 검증(REQ-AT-092)을 통과함을 확인한다."""
+
+    @staticmethod
+    def _trained_lgbm_model():
+        import numpy as np
+
+        rng = np.random.default_rng(0)
+        x = rng.normal(size=(40, 3))
+        y = x @ np.array([0.02, -0.01, 0.015]) + rng.normal(scale=0.01, size=40)
+
+        model = lgb.LGBMRegressor(n_estimators=5, verbosity=-1)
+        model.fit(x, y)
+        return model
+
+    def test_three_lightgbm_family_models_do_not_collide(self, tmp_path: Path):
+        from analyzer.training import persistence as persistence_module
+
+        market, horizon = "domestic", 20
+        trained_date = date(2026, 8, 17)
+
+        point_model = self._trained_lgbm_model()
+        quantile_10 = self._trained_lgbm_model()
+        quantile_90 = self._trained_lgbm_model()
+
+        point_saved = persistence_module.save_model_native(
+            point_model, tmp_path, market, horizon, "lightgbm", trained_date
+        )
+        q10_saved = train_module._save_quantile_model(
+            quantile_10, tmp_path, market, horizon, 0.10, trained_date
+        )
+        q90_saved = train_module._save_quantile_model(
+            quantile_90, tmp_path, market, horizon, 0.90, trained_date
+        )
+
+        paths = {point_saved.model_path, q10_saved.model_path, q90_saved.model_path}
+        assert len(paths) == 3
+        for saved in (point_saved, q10_saved, q90_saved):
+            assert saved.model_path.exists()
+            assert persistence_module.verify_model_integrity(saved.model_path, saved.sidecar_path)
+
+        # 포인트 모델의 파일명·경로는 기존 관례(models/{market}/{horizon}/lightgbm/
+        # {market}_{horizon}_lightgbm_{trained_date}.txt)와 byte-identical해야 한다.
+        assert point_saved.model_path.name == "domestic_20_lightgbm_2026-08-17.txt"
+        # 분위수 보조 모델은 alpha 구분자가 파일명 세그먼트에 추가되어야 한다.
+        assert q10_saved.model_path.name == "domestic_20_lightgbm_2026-08-17_q10.txt"
+        assert q90_saved.model_path.name == "domestic_20_lightgbm_2026-08-17_q90.txt"
+        # 셋 다 같은 algorithm 디렉토리(models/domestic/20/lightgbm/) 아래에 있어야 한다.
+        assert point_saved.model_path.parent == q10_saved.model_path.parent
+        assert point_saved.model_path.parent == q90_saved.model_path.parent
+
+        # 스테이징 임시 디렉토리가 최종 트리에 잔존하지 않아야 한다.
+        leftover_dirs = [p for p in tmp_path.iterdir() if p.name.startswith("tmp")]
+        assert leftover_dirs == []
