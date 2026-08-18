@@ -66,9 +66,11 @@ from analyzer.training.ensemble import compute_confidence, compute_ensemble_scor
 from analyzer.training.models import HORIZONS, MARKETS, QUANTILE_ALPHAS, PooledModel
 from analyzer.training.panel_folds import (
     PanelFoldDateBounds,
+    build_date_sorted_panel,
     extract_global_trade_date_axis,
     map_index_bounds_to_dates,
     slice_panel_by_date_bounds,
+    slice_sorted_panel_by_date_bounds,
     weekly_stride_fold_index_bounds,
 )
 from analyzer.training.split import purged_walk_forward_split
@@ -234,13 +236,19 @@ def tune_initial_history_hyperparameters(
     storage_dir: Path,
     trial_count: int = CAMPAIGN_OPTUNA_TRIALS,
     oos_span_years: int = CAMPAIGN_OOS_EVALUATION_SPAN_YEARS,
+    trade_dates: pd.DatetimeIndex | None = None,
 ) -> dict[str, Any]:
     """REQ-ATE-027/028/029: (시장,horizon,algorithm) 조합당 정확히 1회 튜닝하고
     동결할 하이퍼파라미터 딕셔너리를 반환한다 — 평가 구간(REQ-ATE-021) 데이터는
     `resolve_tuning_split()`이 초기 이력으로만 슬라이싱하므로 이 함수에
     노출되지 않는다.
+
+    `trade_dates`를 생략하면 이 함수가 `panel`에서 직접 추출한다(단독
+    호출 하위호환). 동일 시장 패널로 이 함수를 여러 조합(algorithm×horizon)에
+    걸쳐 반복 호출하는 호출부는 시장당 1회 계산한 축을 넘겨 재계산을 피한다.
     """
-    trade_dates = extract_global_trade_date_axis(panel)
+    if trade_dates is None:
+        trade_dates = extract_global_trade_date_axis(panel)
     initial_history_end_idx = _initial_train_end_index(len(trade_dates), oos_span_years)
     train_df, val_df = resolve_tuning_split(panel, trade_dates, initial_history_end_idx, horizon)
 
@@ -253,6 +261,16 @@ def tune_initial_history_hyperparameters(
     objective = _make_tuning_objective(
         algorithm, x_train.to_numpy(), y_train.to_numpy(), x_val.to_numpy(), y_val.to_numpy()
     )
+    # 리뷰 지적사항(n_jobs 병렬화 검토): create_or_resume_study()는
+    # tuning.py의 SQLite 파일 기반 RDBStorage(sqlite:///optuna_{market}_{horizon}.db)를
+    # 쓴다 — tuning.py 자체 문서(plan.md §B 리스크3)가 "여러 (시장,horizon)
+    # 조합 프로세스가 동시 접근하면 쓰기 잠금 경합이 발생할 수 있다"고
+    # 명시하며, 이는 조합별 별도 파일로도 완전히 해소되지 않는 SQLite
+    # 특유의 다중 커넥션 쓰기 직렬화 제약이다(같은 study 안에서 여러 trial이
+    # 동시에 커밋을 시도하면 "database is locked" 재시도/실패 위험). 따라서
+    # n_jobs>1은 안전성이 검증되지 않았고 n_jobs=1(기본값, 순차 실행)을
+    # 유지한다 — 병렬화하려면 먼저 WAL 모드 전환 또는 PostgreSQL 등
+    # 동시쓰기에 강한 storage로 교체하는 별도 검증이 선행되어야 한다.
     study.optimize(objective, n_trials=trial_count)
     return dict(study.best_params)
 
@@ -265,6 +283,12 @@ def _compute_fold_ensemble(
     `ensemble.compute_ensemble_score()`/`compute_confidence()`는 스칼라
     입력을 받는 순수 함수(REQ-AT-080~084)이므로 배열용으로 재구현하지
     않고(REQ-ATE-014) 원소 단위로 그대로 호출한다.
+
+    리뷰 지적사항(벡터화 검토): numpy 벡터화는 ensemble.py에 신규
+    벡터화 API를 추가(PRESERVE 대상 파일 수정)하거나, 이 모듈에서 동일
+    분기 로직을 numpy로 재구현해야 한다 — 둘 다 REQ-ATE-014(재구현
+    금지)/PRESERVE 제약과 정면으로 충돌해 보류한다(finding #2/#3이 더
+    확실한 성능 개선이므로 그쪽을 우선한다).
     """
     n = len(lgbm_preds)
     ensemble_scores = np.empty(n, dtype=float)
@@ -304,6 +328,7 @@ def run_campaign_for_market_horizon(
     frozen_params_by_algorithm: Mapping[str, Mapping[str, Any]],
     val_size: int = CAMPAIGN_VAL_SIZE_TRADING_DAYS,
     timeout_deadline: float | None = None,
+    trade_dates: pd.DatetimeIndex | None = None,
 ) -> list[MarketHorizonFoldRecord]:
     """(시장,horizon) 조합의 주간 폴드를 순회하며 lgbm/xgb/ensemble 3개 스코어링
     전략의 지표를 계산한다(REQ-ATE-012/013/015/016/026/037/076).
@@ -316,8 +341,15 @@ def run_campaign_for_market_horizon(
     각 폴드의 모델 객체(포인트 2개 + 분위수 보조 2개)는 지표 계산 직후
     이 함수 스코프를 벗어나며 폐기된다 — 어떤 `persistence.py` 저장
     함수도 호출하지 않는다(REQ-ATE-037).
+
+    `trade_dates`를 생략하면 이 함수가 `panel`에서 직접 추출한다(단독
+    호출 하위호환). 패널은 `panel_folds.build_date_sorted_panel()`로 1회만
+    날짜순 정렬한 뒤 폴드마다 `slice_sorted_panel_by_date_bounds()`의
+    이진 탐색으로 슬라이싱한다 — 폴드마다 패널 전체를 boolean mask로
+    재스캔하지 않는다(리뷰 지적사항: O(n_folds × n) → O(n log n)).
     """
-    trade_dates = extract_global_trade_date_axis(panel)
+    if trade_dates is None:
+        trade_dates = extract_global_trade_date_axis(panel)
     index_bounds_list = weekly_stride_fold_index_bounds(
         n_dates=len(trade_dates),
         horizon=horizon,
@@ -328,6 +360,8 @@ def run_campaign_for_market_horizon(
 
     lgbm_params = dict(frozen_params_by_algorithm["lightgbm"])
     xgb_params = dict(frozen_params_by_algorithm["xgboost"])
+
+    sorted_panel, sorted_dates = build_date_sorted_panel(panel)
 
     records: list[MarketHorizonFoldRecord] = []
     for fold_index, index_bounds in enumerate(index_bounds_list):
@@ -344,7 +378,9 @@ def run_campaign_for_market_horizon(
             break
 
         date_bounds = map_index_bounds_to_dates(index_bounds, trade_dates)
-        train_df, val_df = slice_panel_by_date_bounds(panel, date_bounds)
+        train_df, val_df = slice_sorted_panel_by_date_bounds(
+            sorted_panel, sorted_dates, date_bounds
+        )
 
         _, x_train, y_train = train_module._split_features_and_labels(train_df, horizon)
         _, x_val, y_val = train_module._split_features_and_labels(val_df, horizon)
@@ -452,6 +488,54 @@ class CampaignResult:
     error: str | None = None
 
 
+def _assemble_panels_and_tune_params(
+    trainer_engine: Engine,
+    calendar_code: str,
+    cache_dir: Path,
+    data_as_of: date,
+    feature_code_version: str,
+    optuna_storage_dir: Path,
+    oos_span_years: int,
+    optuna_trials: int,
+) -> tuple[
+    dict[str, pd.DataFrame],
+    dict[str, pd.DatetimeIndex],
+    dict[tuple[str, int, str], dict[str, Any]],
+]:
+    """`run_walk_forward_campaign()`과 `run_walk_forward_campaign_and_activate()`가
+    공유하던 패널 조립(REQ-ATE-022, 시장당 1회) + 8개 포인트 조합 1회 초기
+    이력 튜닝(REQ-ATE-027) 블록을 추출한 공통 헬퍼(리뷰 지적사항: 두 함수의
+    ~17줄 동일 블록 중복 제거).
+
+    시장별 전역 거래일 축(`extract_global_trade_date_axis()`)도 이 시점에
+    시장당 정확히 1회만 계산해 반환한다 — 호출부가 이후 폴드 순회/최종
+    재학습 단계에서 동일 축을 재계산 없이 재사용하도록 한다(리뷰 지적사항:
+    시장당 여러 함수 호출에 걸쳐 반복 계산되던 축을 1회로 hoist).
+    """
+    panels: dict[str, pd.DataFrame] = {}
+    trade_dates_by_market: dict[str, pd.DatetimeIndex] = {}
+    for market in MARKETS:
+        panels[market] = _assemble_campaign_dataset(
+            trainer_engine, market, cache_dir, data_as_of, feature_code_version, calendar_code
+        )
+        trade_dates_by_market[market] = extract_global_trade_date_axis(panels[market])
+
+    frozen_params: dict[tuple[str, int, str], dict[str, Any]] = {}
+    for market, horizon, algorithm in POINT_COMBOS:
+        frozen_params[(market, horizon, algorithm)] = tune_initial_history_hyperparameters(
+            panels[market],
+            market,
+            horizon,
+            algorithm,
+            optuna_storage_dir,
+            trial_count=optuna_trials,
+            oos_span_years=oos_span_years,
+            trade_dates=trade_dates_by_market[market],
+        )
+
+    return panels, trade_dates_by_market, frozen_params
+
+
 def run_walk_forward_campaign(
     *,
     trainer_engine: Engine,
@@ -476,29 +560,22 @@ def run_walk_forward_campaign(
     try:
         deadline = time.monotonic() + timeout_hours * 3600
 
-        panels: dict[str, pd.DataFrame] = {}
-        for market in MARKETS:
-            panels[market] = _assemble_campaign_dataset(
-                trainer_engine, market, cache_dir, data_as_of, feature_code_version, calendar_code
-            )
-
-        frozen_params: dict[tuple[str, int, str], dict[str, Any]] = {}
-        for market, horizon, algorithm in POINT_COMBOS:
-            frozen_params[(market, horizon, algorithm)] = tune_initial_history_hyperparameters(
-                panels[market],
-                market,
-                horizon,
-                algorithm,
-                optuna_storage_dir,
-                trial_count=optuna_trials,
-                oos_span_years=oos_span_years,
-            )
+        panels, trade_dates_by_market, frozen_params = _assemble_panels_and_tune_params(
+            trainer_engine,
+            calendar_code,
+            cache_dir,
+            data_as_of,
+            feature_code_version,
+            optuna_storage_dir,
+            oos_span_years,
+            optuna_trials,
+        )
 
         records_by_market_horizon: dict[tuple[str, int], list[MarketHorizonFoldRecord]] = {}
         errors_by_market_horizon: dict[tuple[str, int], str] = {}
         for market in MARKETS:
             panel = panels[market]
-            trade_dates = extract_global_trade_date_axis(panel)
+            trade_dates = trade_dates_by_market[market]
             initial_train_end_idx = _initial_train_end_index(len(trade_dates), oos_span_years)
             n_folds = _resolve_evaluation_fold_count(
                 len(trade_dates), initial_train_end_idx, val_size
@@ -517,6 +594,7 @@ def run_walk_forward_campaign(
                         },
                         val_size=val_size,
                         timeout_deadline=deadline,
+                        trade_dates=trade_dates,
                     )
                 except Exception as exc:  # noqa: BLE001 — 조합 단위 격리(AC-ATE-008)
                     logger.error(
@@ -594,10 +672,16 @@ def _final_fold_train_window(
     initial_train_end_idx: int,
     n_folds: int,
     val_size: int = CAMPAIGN_VAL_SIZE_TRADING_DAYS,
+    trade_dates: pd.DatetimeIndex | None = None,
 ) -> pd.DataFrame:
     """M6 Part 0(REQ-ATE-030): 캠페인의 마지막(가장 최근 데이터를 포함하는)
-    폴드의 학습 구간 데이터를 반환한다 — 챔피언 1차 배포 최종 재학습용."""
-    trade_dates = extract_global_trade_date_axis(panel)
+    폴드의 학습 구간 데이터를 반환한다 — 챔피언 1차 배포 최종 재학습용.
+
+    `trade_dates`를 생략하면 이 함수가 `panel`에서 직접 추출한다(단독
+    호출 하위호환).
+    """
+    if trade_dates is None:
+        trade_dates = extract_global_trade_date_axis(panel)
     index_bounds_list = weekly_stride_fold_index_bounds(
         n_dates=len(trade_dates),
         horizon=horizon,
@@ -622,6 +706,7 @@ def train_and_persist_champion_artifact(
     models_root: Path,
     trained_date: date,
     val_size: int = CAMPAIGN_VAL_SIZE_TRADING_DAYS,
+    trade_dates: pd.DatetimeIndex | None = None,
 ) -> tuple[persistence_module.SavedModel, list[str], int]:
     """M6 Part 0(REQ-ATE-030): 챔피언으로 선정된 (시장,horizon,algorithm)
     조합을 캠페인이 검증한 동결 하이퍼파라미터로 마지막 폴드 학습 구간(최신
@@ -630,8 +715,13 @@ def train_and_persist_champion_artifact(
     학습-서빙 불일치 방지). 폴드 순회 자체(`run_campaign_for_market_horizon`)는
     이 재학습된 모델을 저장하지 않는다(REQ-ATE-037 무관 — 이 함수는 별도의
     단일 최종 재학습이다).
+
+    `trade_dates`를 생략하면 `_final_fold_train_window()`가 `panel`에서
+    직접 추출한다(단독 호출 하위호환).
     """
-    train_df = _final_fold_train_window(panel, horizon, initial_train_end_idx, n_folds, val_size)
+    train_df = _final_fold_train_window(
+        panel, horizon, initial_train_end_idx, n_folds, val_size, trade_dates=trade_dates
+    )
     feature_columns, x_train, y_train = train_module._split_features_and_labels(train_df, horizon)
     model = _fit_point_model(algorithm, frozen_params, x_train.to_numpy(), y_train.to_numpy())
     saved = persistence_module.save_model_native(
@@ -667,6 +757,7 @@ def activate_market_horizon_combo(
     frozen_params_by_algorithm: Mapping[str, Mapping[str, Any]],
     trained_date: date,
     val_size: int = CAMPAIGN_VAL_SIZE_TRADING_DAYS,
+    trade_dates: pd.DatetimeIndex | None = None,
 ) -> ComboActivationOutcome:
     """M6 Part 0/Part 1 통합 배선: 폴드 기록 → 안정화 판정(GATE-1/2/3, M5) →
     챔피언 스코어링 전략 선정(F1) → (배포 가능 시) 최종 재학습+저장(REQ-ATE-030)
@@ -733,6 +824,7 @@ def activate_market_horizon_combo(
             models_root,
             trained_date,
             val_size=val_size,
+            trade_dates=trade_dates,
         )
         jsonl_relative_path = campaign_metrics.fold_metrics_jsonl_filename(
             market, horizon, algorithm
@@ -861,29 +953,24 @@ def run_walk_forward_campaign_and_activate(
     호출해 JSONL 영속화(M4) + 안정화 판정/챔피언 선정(M5) + 1차 배포
     활성화(M6 §2.9)까지 end-to-end로 연결한다. `panels`는 재구성하지 않고
     `run_walk_forward_campaign()` 내부에서 조립된 데이터를 재사용하기 위해,
-    이 함수는 그 함수를 감싸는 대신 동일한 흐름을 인라인으로 재현한다
-    (패널을 캠페인 실행 후에도 활성화 단계에서 재사용해야 하므로 —
-    `run_walk_forward_campaign()`은 패널을 반환하지 않는다).
+    이 함수는 그 함수를 감싸는 대신 동일한 흐름을 재현한다(패널을 캠페인
+    실행 후에도 활성화 단계에서 재사용해야 하므로 — `run_walk_forward_campaign()`은
+    패널을 반환하지 않는다). 패널 조립 + 초기 이력 튜닝 블록 자체는
+    `_assemble_panels_and_tune_params()`로 두 함수가 공유한다(리뷰
+    지적사항: 중복 블록 제거).
     """
     deadline = time.monotonic() + timeout_hours * 3600
 
-    panels: dict[str, pd.DataFrame] = {}
-    for market in MARKETS:
-        panels[market] = _assemble_campaign_dataset(
-            trainer_engine, market, cache_dir, data_as_of, feature_code_version, calendar_code
-        )
-
-    frozen_params: dict[tuple[str, int, str], dict[str, Any]] = {}
-    for market, horizon, algorithm in POINT_COMBOS:
-        frozen_params[(market, horizon, algorithm)] = tune_initial_history_hyperparameters(
-            panels[market],
-            market,
-            horizon,
-            algorithm,
-            optuna_storage_dir,
-            trial_count=optuna_trials,
-            oos_span_years=oos_span_years,
-        )
+    panels, trade_dates_by_market, frozen_params = _assemble_panels_and_tune_params(
+        trainer_engine,
+        calendar_code,
+        cache_dir,
+        data_as_of,
+        feature_code_version,
+        optuna_storage_dir,
+        oos_span_years,
+        optuna_trials,
+    )
 
     records_by_market_horizon: dict[tuple[str, int], list[MarketHorizonFoldRecord]] = {}
     errors_by_market_horizon: dict[tuple[str, int], str] = {}
@@ -892,7 +979,7 @@ def run_walk_forward_campaign_and_activate(
 
     for market in MARKETS:
         panel = panels[market]
-        trade_dates = extract_global_trade_date_axis(panel)
+        trade_dates = trade_dates_by_market[market]
         initial_train_end_idx = _initial_train_end_index(len(trade_dates), oos_span_years)
         n_folds = _resolve_evaluation_fold_count(len(trade_dates), initial_train_end_idx, val_size)
         for horizon in HORIZONS:
@@ -909,6 +996,7 @@ def run_walk_forward_campaign_and_activate(
                     },
                     val_size=val_size,
                     timeout_deadline=deadline,
+                    trade_dates=trade_dates,
                 )
                 records_by_market_horizon[(market, horizon)] = records
 
@@ -927,6 +1015,7 @@ def run_walk_forward_campaign_and_activate(
                     },
                     trained_date=data_as_of,
                     val_size=val_size,
+                    trade_dates=trade_dates,
                 )
                 activation_outcomes[(market, horizon)] = outcome
                 all_stubs.extend(_combo_verdict_stub(outcome))

@@ -31,6 +31,7 @@ purge gap 경계 판정은 반개구간(half-open) `[train_end, val_start)`
 from dataclasses import dataclass
 from typing import cast
 
+import numpy as np
 import pandas as pd
 
 from analyzer.labels.config import PURGE_GAP_TRADING_DAYS
@@ -157,5 +158,53 @@ def slice_panel_by_date_bounds(
         val_df = panel.loc[dates >= bounds.val_start]
     else:
         val_df = panel.loc[(dates >= bounds.val_start) & (dates < bounds.val_end)]
+
+    return train_df, val_df
+
+
+def build_date_sorted_panel(
+    panel: pd.DataFrame, date_column: str = "trade_date"
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """`date_column` 오름차순 정렬 패널 사본 + 대응 정렬 날짜 배열을 1회 계산한다.
+
+    `run_campaign_for_market_horizon()`처럼 동일 패널에 대해
+    `slice_panel_by_date_bounds()`를 폴드마다(최대 수백 회) 반복 호출하는
+    호출부는, 매 폴드 boolean mask로 패널 전체를 재스캔하는 대신 이 함수로
+    1회만 정렬한 뒤 `slice_sorted_panel_by_date_bounds()`의 `np.searchsorted()`
+    이진 탐색을 재사용해야 한다(O(n_folds x n) → O(n log n) + O(n_folds log n)).
+    원본 `panel`의 행 순서는 변경하지 않는다(새 정렬 사본을 반환).
+    """
+    order = np.argsort(panel[date_column].to_numpy(), kind="stable")
+    sorted_panel = panel.iloc[order]
+    sorted_dates = sorted_panel[date_column].to_numpy()
+    return sorted_panel, sorted_dates
+
+
+def slice_sorted_panel_by_date_bounds(
+    sorted_panel: pd.DataFrame,
+    sorted_dates: np.ndarray,
+    bounds: PanelFoldDateBounds,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """`build_date_sorted_panel()`의 정렬 캐시에 대해 `np.searchsorted()`로
+    경계 위치를 찾아 위치 슬라이싱한다.
+
+    `slice_panel_by_date_bounds()`와 동일한 반개구간 `[train_end, val_start)`/
+    `[val_start, val_end)` 결과 집합을 산출한다(값 비교 필터링과 동일한
+    행 집합, 정렬 순서만 다름 — REQ-ATE-019 leakage-safe 원칙 유지).
+    """
+    train_end_pos = int(
+        np.searchsorted(sorted_dates, bounds.train_end.to_datetime64(), side="left")
+    )
+    val_start_pos = int(
+        np.searchsorted(sorted_dates, bounds.val_start.to_datetime64(), side="left")
+    )
+    train_df = sorted_panel.iloc[:train_end_pos]
+    if bounds.val_end is None:
+        val_df = sorted_panel.iloc[val_start_pos:]
+    else:
+        val_end_pos = int(
+            np.searchsorted(sorted_dates, bounds.val_end.to_datetime64(), side="left")
+        )
+        val_df = sorted_panel.iloc[val_start_pos:val_end_pos]
 
     return train_df, val_df
