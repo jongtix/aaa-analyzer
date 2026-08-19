@@ -18,10 +18,12 @@ RUN uv sync --locked --no-dev
 # === Runtime stage ===
 # digest 재핀(2026-08-12): python:3.14-slim(3.14.6-slim-trixie) linux/amd64 최신 digest로 갱신.
 # 재확인: `docker buildx imagetools inspect python:3.14-slim`
-# apt-get upgrade 생략(의도적): 재핀 후 Trivy 재스캔 결과 잔여 CRITICAL/HIGH가 전부
-# Debian trixie 상류에 fix 자체가 없는 unfixed 상태(perl-base/util-linux/ncurses 등 시스템
-# 유틸리티) — apt-get upgrade는 저장소에 패치가 있어야 의미가 있어 여기선 무력하다.
-# 게이트는 --ignore-unfixed로 이 잔여를 정책적으로 처리한다(REQ-CVE-021).
+# apt-get upgrade 생략(의도적, REQ-CVE-018 RETIRED — 재현성 우선 정책): 빌드마다 배포판
+# 최신 패치를 얹는 대신 base 이미지 재핀만으로 바닥을 고정한다. 상류 base 이미지 재빌드
+# 지연으로 재핀 후에도 fix-available CRITICAL/HIGH가 잔존하는 경우(예: util-linux 계열
+# CVE-2026-53615 — Debian trixie에 수정판 2.41.5-0+deb13u1은 이미 게시됐으나 이 이미지가
+# 아직 반영하지 못한 상태)는 만료일 명시 `.trivyignore` 항목으로 처리한다
+# (SPEC-INFRA-CVE-SCAN-001 v0.8.1 REQ-CVE-016/022).
 FROM python:3.14-slim@sha256:d6e0850f13fda0e2305d4c3c1c2f7930fe1042d34ddd958e49bba6ef685d0bb2
 
 # 시스템 pip 제거(REQ-CVE-021 후속): 이 이미지는 uv만 사용하고 시스템 pip을 런타임에
