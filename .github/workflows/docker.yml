@@ -48,6 +48,15 @@ jobs:
         with:
           ref: ${{ steps.tag.outputs.tag }}
 
+      # 게이트 정책 분리: 빌드 소스는 릴리스 태그 트리(재현성), 예외 정책(.trivyignore)은
+      # 항상 main HEAD를 본다 — 예외 등록·만료 갱신이 릴리스 없이 즉시 게이트에 반영된다
+      # (SPEC-INFRA-CVE-SCAN-001 v0.8.1 REQ-CVE-016/017 운영 구조).
+      - name: Overlay .trivyignore from main
+        if: ${{ steps.tag.outputs.valid == 'true' }}
+        run: |
+          git fetch origin main --depth=1
+          git checkout FETCH_HEAD -- .trivyignore || echo "no .trivyignore on main — scan runs without exceptions"
+
       - name: Login to GHCR
         if: ${{ steps.tag.outputs.valid == 'true' }}
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
