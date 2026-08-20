@@ -151,8 +151,17 @@ def slice_panel_by_date_bounds(
     행 위치가 아니라 값 비교이므로, 종목마다 실제 거래일이 전역
     캘린더와 다르더라도(상장폐지, 상장지연 등) 모든 종목이 동시에 같은
     날짜 경계로 분할된다.
+
+    `bounds`는 `extract_global_trade_date_axis()`가 파생시킨
+    `pd.DatetimeIndex`에서 나오므로 항상 `pd.Timestamp`인 반면, `panel`의
+    `date_column`은 호출부에 따라 dtype이 다르다 — `pd.read_sql(...)`이
+    `parse_dates` 없이 MySQL `DATE` 컬럼을 읽으면 파이썬 `datetime.date`를
+    담은 object dtype으로 남는다(pandas 자동 변환 없음). 두 타입을 그대로
+    비교하면 `TypeError: Cannot compare Timestamp with datetime.date`가
+    발생하므로, 비교 직전에 컬럼을 `datetime64`로 정규화해 호출부 dtype과
+    무관하게 동작하게 한다(이미 `datetime64`면 무비용 통과).
     """
-    dates = panel[date_column]
+    dates = pd.to_datetime(panel[date_column])
     train_df = panel.loc[dates < bounds.train_end]
     if bounds.val_end is None:
         val_df = panel.loc[dates >= bounds.val_start]
@@ -173,10 +182,19 @@ def build_date_sorted_panel(
     1회만 정렬한 뒤 `slice_sorted_panel_by_date_bounds()`의 `np.searchsorted()`
     이진 탐색을 재사용해야 한다(O(n_folds x n) → O(n log n) + O(n_folds log n)).
     원본 `panel`의 행 순서는 변경하지 않는다(새 정렬 사본을 반환).
+
+    반환하는 `sorted_dates`는 `slice_sorted_panel_by_date_bounds()`가
+    `np.searchsorted()`로 `pd.Timestamp` 경계와 비교하는 배열이므로,
+    `slice_panel_by_date_bounds()`와 동일한 이유로 여기서 한 번
+    `datetime64`로 정규화한다 — object dtype(`datetime.date`) 배열을
+    그대로 넘기면 `TypeError: '>' not supported between instances of
+    'datetime.datetime' and 'datetime.date'`가 발생한다. 정규화를 폴드
+    루프가 아니라 이 1회 캐시 구성 시점에 두어 이진 탐색의 이득을 유지한다.
     """
-    order = np.argsort(panel[date_column].to_numpy(), kind="stable")
+    dates = pd.to_datetime(panel[date_column]).to_numpy()
+    order = np.argsort(dates, kind="stable")
     sorted_panel = panel.iloc[order]
-    sorted_dates = sorted_panel[date_column].to_numpy()
+    sorted_dates = dates[order]
     return sorted_panel, sorted_dates
 
 

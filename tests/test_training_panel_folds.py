@@ -12,9 +12,11 @@ import pytest
 
 from analyzer.labels.config import PURGE_GAP_TRADING_DAYS
 from analyzer.training.panel_folds import (
+    build_date_sorted_panel,
     extract_global_trade_date_axis,
     map_index_bounds_to_dates,
     slice_panel_by_date_bounds,
+    slice_sorted_panel_by_date_bounds,
     weekly_stride_fold_index_bounds,
 )
 from analyzer.training.split import expanding_window_folds
@@ -32,6 +34,23 @@ def _make_synthetic_panel() -> pd.DataFrame:
     panel = pd.concat([stock_a, stock_b, stock_c], ignore_index=True)
     panel["value"] = range(len(panel))
     return panel
+
+
+def _to_object_dtype_date_panel(panel: pd.DataFrame) -> pd.DataFrame:
+    """`pd.read_sql(...)`이 `parse_dates` 없이 MySQL `DATE` 컬럼을 읽었을 때의
+    패널을 재현한다 — `trade_date`가 `datetime64`가 아니라 파이썬
+    `datetime.date` 객체를 담은 object dtype Series가 된다(pandas는 이
+    경로에서 자동 변환하지 않는다).
+
+    실 DB 조립 경로(`train.fetch_market_data()` → `dataset.assemble_dataset()`)가
+    산출하는 dtype이며, 합성 패널(`pd.bdate_range`)만 쓰는 기존 테스트는
+    이 dtype을 한 번도 통과시키지 않았다.
+    """
+    object_dtype_panel = panel.copy()
+    object_dtype_panel["trade_date"] = pd.Series(
+        [value.date() for value in panel["trade_date"]], dtype=object
+    )
+    return object_dtype_panel
 
 
 class TestExtractGlobalTradeDateAxis:
@@ -235,3 +254,56 @@ class TestDateBoundaryPanelFiltering:
 
         _, val_df = slice_panel_by_date_bounds(panel, date_bounds)
         assert (val_df["trade_date"] >= date_bounds.val_start).all()
+
+
+class TestObjectDtypeDateColumnRegression:
+    """실 DB 조립 패널(object dtype `datetime.date`)과 `pd.Timestamp` 경계의 비교 회귀.
+
+    `extract_global_trade_date_axis()`는 `pd.DatetimeIndex`(=`pd.Timestamp`)
+    축을 파생시키는 반면, 패널의 `trade_date` 컬럼 자체는 `pd.read_sql(...)`이
+    `parse_dates` 없이 읽은 object dtype `datetime.date`로 남는다 — 두 슬라이싱
+    함수는 이 두 타입을 직접 비교하므로 실 캠페인 첫 실행에서 결정적으로
+    깨졌다(`TypeError: Cannot compare Timestamp with datetime.date`,
+    `TypeError: '>' not supported between instances of 'datetime.datetime'
+    and 'datetime.date'`). 슬라이싱 함수는 호출부 dtype과 무관하게 동작해야 한다.
+    """
+
+    def test_mask_slicing_accepts_object_dtype_date_column(self):
+        panel = _to_object_dtype_date_panel(_make_synthetic_panel())
+        axis = extract_global_trade_date_axis(panel)
+
+        index_bounds = weekly_stride_fold_index_bounds(
+            n_dates=len(axis), horizon=20, initial_train_end=150, val_size=5, n_folds=1
+        )[0]
+        date_bounds = map_index_bounds_to_dates(index_bounds, axis)
+
+        train_df, val_df = slice_panel_by_date_bounds(panel, date_bounds)
+
+        assert not train_df.empty
+        assert not val_df.empty
+        assert (pd.to_datetime(train_df["trade_date"]) < date_bounds.train_end).all()
+        assert (pd.to_datetime(val_df["trade_date"]) >= date_bounds.val_start).all()
+        assert date_bounds.val_end is not None
+        assert (pd.to_datetime(val_df["trade_date"]) < date_bounds.val_end).all()
+
+    def test_sorted_cache_slicing_accepts_object_dtype_date_column(self):
+        """`build_date_sorted_panel()` + `slice_sorted_panel_by_date_bounds()`
+        이진 탐색 경로도 동일한 행 집합을 산출해야 한다(캠페인 폴드 루프 경로)."""
+        panel = _to_object_dtype_date_panel(_make_synthetic_panel())
+        axis = extract_global_trade_date_axis(panel)
+
+        index_bounds = weekly_stride_fold_index_bounds(
+            n_dates=len(axis), horizon=20, initial_train_end=150, val_size=5, n_folds=1
+        )[0]
+        date_bounds = map_index_bounds_to_dates(index_bounds, axis)
+
+        sorted_panel, sorted_dates = build_date_sorted_panel(panel)
+        train_df, val_df = slice_sorted_panel_by_date_bounds(
+            sorted_panel, sorted_dates, date_bounds
+        )
+        expected_train_df, expected_val_df = slice_panel_by_date_bounds(panel, date_bounds)
+
+        assert not train_df.empty
+        assert not val_df.empty
+        assert set(train_df["value"]) == set(expected_train_df["value"])
+        assert set(val_df["value"]) == set(expected_val_df["value"])
