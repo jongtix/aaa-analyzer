@@ -114,6 +114,109 @@ def _make_synthetic_panel(n_dates: int, n_stocks: int = 1, seed: int = 42) -> pd
     return pd.concat(frames, ignore_index=True)
 
 
+def _make_panel_with_label_lookahead_tail(
+    n_dates: int, n_stocks: int = 2, seed: int = 7
+) -> pd.DataFrame:
+    """실제 레이블 계산과 동일한 **꼬리 결측**을 재현한 합성 패널.
+
+    `label_D{h}`는 그 행의 `trade_date` 이후 h영업일치 미래 가격이 있어야
+    계산된다(REQ-AL-030) — 데이터 축의 마지막 h거래일은 아직 미래
+    데이터가 없어 구조적으로 `label_D{h}`가 NaN
+    (`exclude_reason="insufficient_future_data"`)이다. `_make_synthetic_panel()`은
+    전 구간에 레이블을 채워 이 꼬리 사각지대를 모델링하지 않으므로,
+    폴드 산식이 그 구간을 침범해도 테스트가 잡아내지 못한다.
+    """
+    panel = _make_synthetic_panel(n_dates=n_dates, n_stocks=n_stocks, seed=seed)
+    dates = pd.DatetimeIndex(sorted(panel["trade_date"].unique()))
+    for horizon in HORIZONS:
+        tail_start = dates[len(dates) - horizon]
+        panel.loc[panel["trade_date"] >= tail_start, f"label_D{horizon}"] = np.nan
+    return panel
+
+
+class TestEvaluationFoldCountRespectsLabelLookaheadTail:
+    """회귀: `_resolve_evaluation_fold_count()`가 purge gap만 차감하고 레이블
+    전방 관측(lookahead) 꼬리를 차감하지 않아, 마지막 폴드의 검증 윈도우가
+    `label_D60`이 구조적으로 존재하지 않는 구간(축 마지막 60거래일)에
+    들어가 검증 표본이 0개가 되던 결함.
+
+    `PURGE_GAP_TRADING_DAYS[60] == 60`이 `max(HORIZONS) == 60`과 우연히
+    같은 값이라 gap 1회 차감으로 충분해 보이지만, 둘은 서로 다른 개념이며
+    각각 독립적으로 예약돼야 한다.
+
+    라이브 캠페인에서는 `domestic horizon=60` 조합의 마지막 폴드가
+    `LGBMRegressor.predict()`에 0행 배열을 넘겨 `ValueError`를 냈고,
+    조합 단위 try/except(AC-ATE-008) 때문에 그 조합의 폴드 기록 전체가
+    유실됐다.
+    """
+
+    N_DATES = 350
+    INITIAL_TRAIN_END_IDX = 200
+    VAL_SIZE = 5
+
+    def _n_folds(self) -> int:
+        return campaign_module._resolve_evaluation_fold_count(
+            self.N_DATES, self.INITIAL_TRAIN_END_IDX, self.VAL_SIZE
+        )
+
+    def test_every_fold_val_window_has_computable_labels_for_every_horizon(self):
+        panel = _make_panel_with_label_lookahead_tail(self.N_DATES)
+        trade_dates = campaign_module.extract_global_trade_date_axis(panel)
+        sorted_panel, sorted_dates = campaign_module.build_date_sorted_panel(panel)
+        n_folds = self._n_folds()
+        assert n_folds >= 1
+
+        # REQ-ATE-015: 동일 시장의 D20/D60은 같은 n_folds(=같은 train_end
+        # 시퀀스)를 공유하므로, 그 공유 값이 **모든** horizon에서 안전해야 한다.
+        for horizon in HORIZONS:
+            index_bounds_list = campaign_module.weekly_stride_fold_index_bounds(
+                n_dates=len(trade_dates),
+                horizon=horizon,
+                initial_train_end=self.INITIAL_TRAIN_END_IDX,
+                val_size=self.VAL_SIZE,
+                n_folds=n_folds,
+            )
+            for fold_index, index_bounds in enumerate(index_bounds_list):
+                date_bounds = campaign_module.map_index_bounds_to_dates(index_bounds, trade_dates)
+                _, val_df = campaign_module.slice_sorted_panel_by_date_bounds(
+                    sorted_panel, sorted_dates, date_bounds
+                )
+                _, _, y_val = campaign_module.train_module._split_features_and_labels(
+                    val_df, horizon
+                )
+                assert len(y_val) > 0, (
+                    f"horizon={horizon} fold={fold_index}의 검증 표본이 0개다 "
+                    f"(bounds={index_bounds}) — 레이블 전방 관측 꼬리 침범"
+                )
+
+    def test_max_horizon_campaign_completes_every_fold(self):
+        """마지막 폴드에서 `predict()`가 0행 배열을 받아 터지던 경로 자체를 재현한다."""
+        panel = _make_panel_with_label_lookahead_tail(self.N_DATES)
+        n_folds = self._n_folds()
+
+        records = run_campaign_for_market_horizon(
+            panel,
+            market="domestic",
+            horizon=max(HORIZONS),
+            initial_train_end_idx=self.INITIAL_TRAIN_END_IDX,
+            n_folds=n_folds,
+            frozen_params_by_algorithm={
+                "lightgbm": {"n_estimators": 5, "num_leaves": 7},
+                "xgboost": {"n_estimators": 5, "max_depth": 3},
+            },
+            val_size=self.VAL_SIZE,
+        )
+
+        assert len(records) == n_folds
+
+    def test_fold_count_shared_across_horizons_is_not_special_cased(self):
+        """REQ-ATE-015: 폴드 수는 horizon 인자를 받지 않는다(시장 단위 공유값)."""
+        import inspect
+
+        signature = inspect.signature(campaign_module._resolve_evaluation_fold_count)
+        assert "horizon" not in signature.parameters
+
+
 class TestComputeFoldEnsembleDegenerateQuantileFallback:
     """리뷰 지적사항: `_compute_fold_ensemble()`의 축퇴 분위수 분포
     (p10==p90) 폴백 confidence=0.5 분기가 기존에 테스트 커버리지가

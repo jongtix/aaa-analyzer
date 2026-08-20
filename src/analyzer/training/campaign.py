@@ -130,13 +130,34 @@ def _resolve_evaluation_fold_count(n_dates: int, initial_train_end_idx: int, val
     """REQ-ATE-021 계산식(`floor(평가구간 거래일수 ÷ val_size)`)으로 폴드 수를 유도한다.
 
     REQ-ATE-015는 동일 시장의 D20/D60 조합이 동일한 `train_end` 시퀀스를
-    공유해야 한다고 요구하므로, 두 horizon 중 더 넓은 purge gap(D60=60
-    영업일)이 마지막 폴드에서도 안전하게 수용되도록 보수적으로 gap을
-    차감한 뒤 폴드 수를 계산한다 — 이렇게 하면 동일한 n_folds로 두
-    horizon 모두 `weekly_stride_fold_index_bounds()`가 예외 없이 성공한다.
+    공유해야 한다고 요구하므로, 두 horizon 모두에서 안전한 보수적
+    상한(각 항목의 최댓값)을 차감한 뒤 폴드 수를 계산한다 — 이렇게 하면
+    동일한 n_folds로 두 horizon 모두 예외 없이 성공한다.
+
+    horizon 하나가 축 끝에 예약해야 하는 거래일 수는 **서로 다른 개념 2개**의
+    합이며, 각각 독립적으로 차감해야 한다(이 프로젝트 설정에서는 둘 다 60이라
+    하나로 갈음되는 것처럼 보이지만 아니다):
+
+    1. `PURGE_GAP_TRADING_DAYS[h]` — 폴드 내부의 purge gap. `train_end`와
+       `val_start` **사이에 삽입되는** 누출 방지 버퍼이며,
+       `weekly_stride_fold_index_bounds()`가 `val_start = train_end + gap`으로
+       소비한다.
+    2. `h`(horizon) — 레이블 전방 관측(lookahead) 꼬리. `label_D{h}`는 그 행
+       이후 h영업일치 미래 가격이 있어야 계산되므로(REQ-AL-030), 거래일 축의
+       **마지막 h거래일**은 구조적으로 레이블이 NaN이다
+       (`exclude_reason="insufficient_future_data"`). 이 구간을 검증 윈도우로
+       잡으면 `_split_features_and_labels()`의 dropna 이후 검증 표본이 0개가
+       되어 `predict()`가 `ValueError: Found array with 0 sample(s)`로 실패한다.
+
+    마지막 폴드의 `val_end = initial_train_end + n_folds * val_size +
+    PURGE_GAP_TRADING_DAYS[h]`이고 레이블이 존재하려면
+    `val_end <= n_dates - h`여야 하므로, horizon별 필요 예약량은
+    `PURGE_GAP_TRADING_DAYS[h] + h`다. REQ-ATE-015가 요구하는 시장 단위
+    공유 폴드 수(D20/D60 동일 `train_end` 시퀀스)를 유지하기 위해 그 중
+    최댓값을 차감한다 — horizon별로 폴드 수를 다르게 두지 않는다.
     """
-    max_gap = max(PURGE_GAP_TRADING_DAYS.values())
-    usable_span = n_dates - initial_train_end_idx - max_gap
+    max_tail_reserve = max(PURGE_GAP_TRADING_DAYS[horizon] + horizon for horizon in HORIZONS)
+    usable_span = n_dates - initial_train_end_idx - max_tail_reserve
     return max(usable_span // val_size, 0)
 
 
