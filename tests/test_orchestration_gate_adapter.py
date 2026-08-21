@@ -253,6 +253,7 @@ class TestBuildGatePromotionFnFailures:
             promotion_gate_fn(True)
 
         metrics.record_failure.assert_called_once_with(stage="promotion_gate")
+        metrics.record_success.assert_not_called()
 
     def test_nonzero_exit_code(self, tmp_path: Path):
         config = _make_config(tmp_path)
@@ -271,6 +272,7 @@ class TestBuildGatePromotionFnFailures:
             promotion_gate_fn(True)
 
         metrics.record_failure.assert_called_once_with(stage="promotion_gate")
+        metrics.record_success.assert_not_called()
         assert connection.close_calls == 1
 
     def test_timeout(self, tmp_path: Path):
@@ -290,6 +292,7 @@ class TestBuildGatePromotionFnFailures:
             promotion_gate_fn(True)
 
         metrics.record_failure.assert_called_once_with(stage="promotion_gate")
+        metrics.record_success.assert_not_called()
 
     def test_stdout_json_parse_failure(self, tmp_path: Path):
         config = _make_config(tmp_path)
@@ -308,6 +311,7 @@ class TestBuildGatePromotionFnFailures:
             promotion_gate_fn(True)
 
         metrics.record_failure.assert_called_once_with(stage="promotion_gate")
+        metrics.record_success.assert_not_called()
 
     def test_verdict_deserialize_failure(self, tmp_path: Path):
         config = _make_config(tmp_path)
@@ -327,6 +331,7 @@ class TestBuildGatePromotionFnFailures:
             promotion_gate_fn(True)
 
         metrics.record_failure.assert_called_once_with(stage="promotion_gate")
+        metrics.record_success.assert_not_called()
 
     def test_failure_does_not_call_handle_training_run_failure(self, tmp_path: Path):
         """D1: handle_training_run_failure() 미경유 — FailureStage Literal이
