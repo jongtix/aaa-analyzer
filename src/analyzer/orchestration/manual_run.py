@@ -12,12 +12,14 @@ SPEC-ANALYZER-TRAIN-AUTOMATION-001: cron 자동 등록(`scheduler.py`
 
 import argparse
 import sys
+from collections.abc import Callable, Mapping
 from datetime import date
 
 from analyzer.common.logging import get_logger
 from analyzer.common.trace import new_trace_id
 from analyzer.orchestration.config import AutomationConfig, get_automation_config
 from analyzer.orchestration.metrics import TrainingMetrics
+from analyzer.orchestration.promotion_gate import PromotionVerdict
 from analyzer.orchestration.runner import RunKind, RunOutcome, execute_scheduled_training_run
 from analyzer.orchestration.ssh_dispatch import ParamikoSshConnection
 from analyzer.orchestration.wol import UdpBroadcastWolSender
@@ -35,6 +37,8 @@ def run_training(
     data_as_of: date,
     config: AutomationConfig,
     metrics: TrainingMetrics,
+    promotion_gate_fn: Callable[[bool], Mapping[tuple[str, int, str], PromotionVerdict]]
+    | None = None,
 ) -> RunOutcome:
     """설정 로딩 이후의 배선(WoL sender·SSH 연결 팩토리)을 담당한다.
 
@@ -47,6 +51,11 @@ def run_training(
     이 함수 안에서 매 호출마다 새로 만들면 같은 프로세스에서 두 번째 호출부터
     "Duplicated timeseries" 오류로 죽는다(cron이 같은 프로세스에서 반복
     실행되므로 재사용 필수).
+
+    `promotion_gate_fn`(REQ-ATG-006, 하위 호환 기본값 `None`): 지정되면
+    `execute_scheduled_training_run()`에 그대로 전달된다(1차 배포 이후 상시
+    게이트 경로). 미지정 시 기존 동작(1차 배포 이전, None 경로)이 그대로
+    유지된다.
     """
     wol_sender = UdpBroadcastWolSender()
 
@@ -70,6 +79,7 @@ def run_training(
         wol_sender=wol_sender,
         connection_factory=connection_factory,
         metrics=metrics,
+        promotion_gate_fn=promotion_gate_fn,
     )
 
 

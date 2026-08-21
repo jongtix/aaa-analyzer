@@ -155,6 +155,63 @@ class TestRunTraining:
         assert callable(captured["connection_factory"])
         assert hasattr(captured["wol_sender"], "send")
 
+    def test_forwards_promotion_gate_fn_when_provided(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """REQ-ATG-006: promotion_gate_fn이 execute_scheduled_training_run()에
+        그대로 전달되어야 한다(AC-ATG-006)."""
+        config = _make_config(tmp_path)
+        captured: dict = {}
+
+        def fake_execute(**kwargs):
+            captured.update(kwargs)
+            return RunOutcome(success=True, promoted=True)
+
+        monkeypatch.setattr(manual_run, "execute_scheduled_training_run", fake_execute)
+
+        def fake_promotion_gate_fn(promoted: bool):
+            return {}
+
+        manual_run.run_training(
+            run_kind="weekly",
+            run_id="run-3",
+            market="domestic",
+            horizon=5,
+            algorithm="lightgbm",
+            data_as_of=date(2026, 8, 11),
+            config=config,
+            metrics=TrainingMetrics(registry=CollectorRegistry()),
+            promotion_gate_fn=fake_promotion_gate_fn,
+        )
+
+        assert captured["promotion_gate_fn"] is fake_promotion_gate_fn
+
+    def test_promotion_gate_fn_defaults_to_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """하위 호환: 미지정 시 기존 동작(None 경로)이 유지되어야 한다."""
+        config = _make_config(tmp_path)
+        captured: dict = {}
+
+        def fake_execute(**kwargs):
+            captured.update(kwargs)
+            return RunOutcome(success=True, promoted=True)
+
+        monkeypatch.setattr(manual_run, "execute_scheduled_training_run", fake_execute)
+
+        manual_run.run_training(
+            run_kind="weekly",
+            run_id="run-4",
+            market="domestic",
+            horizon=5,
+            algorithm="lightgbm",
+            data_as_of=date(2026, 8, 11),
+            config=config,
+            metrics=TrainingMetrics(registry=CollectorRegistry()),
+        )
+
+        assert captured["promotion_gate_fn"] is None
+
     def test_returns_failure_outcome_unmodified(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
