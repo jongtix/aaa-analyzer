@@ -118,6 +118,35 @@ class TestWireWeeklyRetrainJobRegistration:
         assert "misfire_grace_time" in kwargs
 
 
+class TestTrainingMetricsSingleton:
+    """AC-ATG-004: TrainingMetrics는 프로세스당 1회만 생성되어 콜백 클로저에
+    주입된다 — 콜백을 2회 이상 연속 발화시켜도 재생성되지 않는다."""
+
+    def test_repeated_callback_invocation_does_not_recreate_metrics(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+        config = _make_config(tmp_path)
+        # 격리 레지스트리에 1회만 생성 — wire_weekly_retrain_job()은 이미
+        # 생성된 metrics를 인자로 받을 뿐 내부에서 재생성하지 않는다(구조적
+        # 보장). 콜백을 2회 호출해도 "Duplicated timeseries" 예외가 없어야 한다.
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        monkeypatch.setattr(
+            main_module, "run_training", lambda **_: RunOutcome(success=True, promoted=True)
+        )
+        monkeypatch.setattr(main_module, "build_gate_promotion_fn", lambda **_: lambda promoted: {})
+
+        main_module.wire_weekly_retrain_job(registry, config=config, metrics=metrics)
+
+        _, kwargs = mock_scheduler.add_job.call_args
+        weekly_callback = kwargs.get("func") or mock_scheduler.add_job.call_args.args[0]
+
+        weekly_callback()
+        weekly_callback()  # 2회 연속 발화 — 예외 없이 완료되어야 한다.
+
+
 class TestWeeklyJobCallback:
     """AC-ATG-005/006: data_as_of 산출 + run_training() 전-조합 센티널 전달."""
 
