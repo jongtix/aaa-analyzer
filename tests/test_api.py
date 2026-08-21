@@ -91,16 +91,22 @@ class TestMainEntrypoint:
 
         from analyzer.orchestration.metrics import TrainingMetrics
 
+        shutdown_calls: list[bool] = []
+
         monkeypatch.setattr(main, "get_automation_config", lambda: fake_config)
         monkeypatch.setattr(
             main, "TrainingMetrics", lambda: TrainingMetrics(registry=CollectorRegistry())
         )
         monkeypatch.setattr(main.SchedulerRegistry, "start", lambda self: None)
-        monkeypatch.setattr(main.SchedulerRegistry, "shutdown", lambda self, wait=True: None)
+        monkeypatch.setattr(
+            main.SchedulerRegistry, "shutdown", lambda self, wait=True: shutdown_calls.append(True)
+        )
 
         asyncio.run(main.run(host="127.0.0.1", port=8001))
 
         assert served["called"] is True
+        # REQ-ATG-001: 프로세스 종료 경로에서 shutdown() 훅이 호출되어야 한다.
+        assert shutdown_calls == [True]
 
 
 class TestOrchestrationPlaceholders:
