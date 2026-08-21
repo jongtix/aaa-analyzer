@@ -356,3 +356,82 @@ class TestBuildGatePromotionFnFailures:
 
         with pytest.raises(GatePromotionFailure):
             promotion_gate_fn(True)
+
+
+class TestBuildGatePromotionFnFailureLogging:
+    """High-3 수정: SSH 연결 실패/타임아웃/비정상 종료코드 3종 분기가
+    diagnostic 정보(캡처된 stdout/stderr 또는 연결 대상)와 함께
+    logger.error()를 호출해야 한다 — 기존에는 예외 재발생만 하고
+    로그를 남기지 않아 원인 진단이 불가능했다."""
+
+    def test_ssh_connect_failure_logs_error(self, tmp_path: Path, caplog: pytest.LogCaptureFixture):
+        config = _make_config(tmp_path)
+        metrics = MagicMock()
+        connection = _FakeConnection(connect_should_fail=True)
+
+        promotion_gate_fn = build_gate_promotion_fn(
+            config=config,
+            metrics=metrics,
+            data_as_of=date(2026, 8, 22),
+            connection_factory=lambda: connection,
+            ssh_max_retries=1,
+            ssh_retry_interval_seconds=0.0,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        with caplog.at_level("ERROR"):
+            with pytest.raises(GatePromotionFailure):
+                promotion_gate_fn(True)
+
+        assert any("ssh connect failed" in record.message for record in caplog.records)
+        assert any(config.ssh_host in record.message for record in caplog.records)
+
+    def test_timeout_logs_error_with_captured_lines(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        config = _make_config(tmp_path)
+        metrics = MagicMock()
+        connection = _FakeConnection(
+            output_lines=["remote traceback line 1", "remote traceback line 2"],
+            exec_result=CommandResult(exit_code=-1, timed_out=True),
+        )
+
+        promotion_gate_fn = build_gate_promotion_fn(
+            config=config,
+            metrics=metrics,
+            data_as_of=date(2026, 8, 22),
+            connection_factory=lambda: connection,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        with caplog.at_level("ERROR"):
+            with pytest.raises(GatePromotionFailure):
+                promotion_gate_fn(True)
+
+        assert any("timed out" in record.message for record in caplog.records)
+        assert any("remote traceback line 1" in record.message for record in caplog.records)
+
+    def test_nonzero_exit_code_logs_error_with_captured_lines(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        config = _make_config(tmp_path)
+        metrics = MagicMock()
+        connection = _FakeConnection(
+            output_lines=["Traceback (most recent call last):", "RuntimeError: boom"],
+            exec_result=CommandResult(exit_code=1),
+        )
+
+        promotion_gate_fn = build_gate_promotion_fn(
+            config=config,
+            metrics=metrics,
+            data_as_of=date(2026, 8, 22),
+            connection_factory=lambda: connection,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        with caplog.at_level("ERROR"):
+            with pytest.raises(GatePromotionFailure):
+                promotion_gate_fn(True)
+
+        assert any("exited non-zero" in record.message for record in caplog.records)
+        assert any("RuntimeError: boom" in record.message for record in caplog.records)

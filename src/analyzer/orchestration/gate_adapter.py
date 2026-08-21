@@ -41,6 +41,11 @@ GATE_TIMEOUT_SECONDS_DEFAULT: float = 2 * 60 * 60
 DATA_AS_OF_OFFSET_DAYS: int = 1
 """REQ-ATG-005: data_as_of 산출 오프셋(발화일 전일=1) — 이름 있는 상수(하드코딩 금지)."""
 
+_CAPTURED_LINES_LOG_TAIL: int = 50
+"""High-3 수정: 실패 로그에 첨부하는 captured_lines(원격 stdout/stderr)의
+최근 라인 수 상한 — 무제한 버퍼링(성능 리뷰 지적)이 그대로 로그 크기로
+번지지 않도록 마지막 N줄만 남긴다."""
+
 
 def resolve_gate_timeout_seconds() -> float:
     """REQ-ATG-008: 환경변수 오버라이드를 지원하는 게이트 타임아웃 상수 조회."""
@@ -177,6 +182,12 @@ def build_gate_promotion_fn(
             sleep_fn=sleep_fn,
         )
         if not connected:
+            logger.error(
+                "gate ssh connect failed max_retries=%s target=%s:%s",
+                ssh_max_retries,
+                config.ssh_host,
+                config.ssh_port,
+            )
             metrics.record_failure(stage="promotion_gate")
             raise GatePromotionFailure(f"게이트 SSH 연결 {ssh_max_retries}회 재시도 실패")
 
@@ -207,10 +218,20 @@ def build_gate_promotion_fn(
             )
 
             if result.timed_out:
+                logger.error(
+                    "gate remote execution timed out timeout_seconds=%s captured_lines=%s",
+                    effective_timeout,
+                    captured_lines[-_CAPTURED_LINES_LOG_TAIL:],
+                )
                 metrics.record_failure(stage="promotion_gate")
                 raise GatePromotionFailure(f"게이트 원격 실행 {effective_timeout}초 타임아웃 초과")
 
             if result.exit_code != 0:
+                logger.error(
+                    "gate cli exited non-zero exit_code=%s captured_lines=%s",
+                    result.exit_code,
+                    captured_lines[-_CAPTURED_LINES_LOG_TAIL:],
+                )
                 metrics.record_failure(stage="promotion_gate")
                 raise GatePromotionFailure(f"게이트 CLI 비정상 종료코드 {result.exit_code}")
 
