@@ -257,6 +257,44 @@ class TestWeeklyJobCallback:
         with pytest.raises(RuntimeError):
             weekly_callback()
 
+    def test_gate_failure_produces_structured_log_with_run_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        """Critical-2 수정(REQ-ATG-012 §B 리스크 3): 게이트 실패
+        (`GatePromotionFailure`)는 `runner.py`의 `promotion_gate_fn` 호출부에
+        try/except가 없어 `run_training()` 밖으로 그대로 전파된다 — 이
+        경로가 프로젝트 구조화 로거(`run_id` 포함)로 기록된 뒤 재발생하는지
+        확인한다(이전에는 APScheduler 내부 로거로만 흘러가 trace_id 상관관계가
+        끊겼다)."""
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+        config = _make_config(tmp_path)
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        def _raise_run_training(**_kwargs):
+            from analyzer.orchestration.gate_adapter import GatePromotionFailure
+
+            raise GatePromotionFailure("게이트 stdout JSON 파싱 실패")
+
+        monkeypatch.setattr(main_module, "run_training", _raise_run_training)
+        monkeypatch.setattr(main_module, "build_gate_promotion_fn", lambda **_: lambda promoted: {})
+
+        main_module.wire_weekly_retrain_job(registry, config=config, metrics=metrics)
+
+        _, kwargs = mock_scheduler.add_job.call_args
+        weekly_callback = kwargs.get("func") or mock_scheduler.add_job.call_args.args[0]
+
+        with caplog.at_level("ERROR"):
+            from analyzer.orchestration.gate_adapter import GatePromotionFailure
+
+            with pytest.raises(GatePromotionFailure):
+                weekly_callback()
+
+        matching = [r for r in caplog.records if "weekly training run raised" in r.message]
+        assert len(matching) == 1
+        assert "run_id=" in matching[0].message
+        assert matching[0].exc_info is not None
+
 
 class TestWeeklyJobRealChainParamsFromActiveMeta:
     """Critical-1 수정 재검증(AC-ATG-011): `main.py`의 실제 배선 →

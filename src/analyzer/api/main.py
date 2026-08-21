@@ -73,22 +73,32 @@ def wire_weekly_retrain_job(
         # 원격 학습 CLI는 조합 인자를 받지 않아 1회 호출이 전 조합을 학습하고,
         # 조합별 성공/보류 귀속은 promotion_gate_fn이 반환하는 verdict별로
         # runner.py가 수행한다(단일 실조합 값 사용 금지).
-        outcome = run_training(
-            run_kind="weekly",
-            run_id=run_id,
-            market="all",
-            horizon=0,
-            algorithm="all",
-            data_as_of=data_as_of,
-            config=config,
-            metrics=metrics,
-            promotion_gate_fn=promotion_gate_fn,
-            # REQ-ATG-011: 활성 챔피언 사이드카(M1 리더 재사용)에서 조합별
-            # 동결 하이퍼파라미터를 읽어 주간 원격 학습에 주입한다 — 게이트
-            # 챌린저와 동일 파라미터로 학습하게 하는 유일한 프로덕션 배선
-            # 지점(AC-ATG-011).
-            params_from_active_meta=config.active_models_root,
-        )
+        try:
+            outcome = run_training(
+                run_kind="weekly",
+                run_id=run_id,
+                market="all",
+                horizon=0,
+                algorithm="all",
+                data_as_of=data_as_of,
+                config=config,
+                metrics=metrics,
+                promotion_gate_fn=promotion_gate_fn,
+                # REQ-ATG-011: 활성 챔피언 사이드카(M1 리더 재사용)에서 조합별
+                # 동결 하이퍼파라미터를 읽어 주간 원격 학습에 주입한다 — 게이트
+                # 챌린저와 동일 파라미터로 학습하게 하는 유일한 프로덕션 배선
+                # 지점(AC-ATG-011).
+                params_from_active_meta=config.active_models_root,
+            )
+        except Exception:
+            # Critical-2 수정: 게이트 실패(GatePromotionFailure)는 runner.py의
+            # promotion_gate_fn 호출부에 try/except가 없어 이 지점까지 그대로
+            # 전파된다 — 여기서 구조화 로거(run_id 포함)로 기록한 뒤 재발생해야
+            # APScheduler 내부 로거로만 흘러가 trace_id 상관관계가 끊기는 것을
+            # 막는다. metrics.record_failure()는 다시 호출하지 않는다(gate_adapter가
+            # 이미 기록, 이중 기록 방지).
+            logger.error("weekly training run raised run_id=%s", run_id, exc_info=True)
+            raise
         if not outcome.success:
             # §B 리스크 3: 콜백 레벨에서는 metrics.record_failure()를 다시
             # 호출하지 않는다 — runner 내부 실패 4종은 handle_training_run_failure()가,
