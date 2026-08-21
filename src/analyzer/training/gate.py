@@ -221,17 +221,31 @@ def run_gate(
             }
             if not combo_champion_paths:
                 continue
-            lgbm_params = read_frozen_hyperparameters(models_root, market, horizon, "lightgbm")
-            xgb_params = read_frozen_hyperparameters(models_root, market, horizon, "xgboost")
-            verdicts = evaluate_and_promote(
-                models_root=models_root,
-                panel_by_market=panel_by_market,
-                champion_model_paths=combo_champion_paths,
-                challenger_trained_date=data_as_of,
-                merged_to_active=merged_to_active,
-                lgbm_params=lgbm_params,
-                xgb_params=xgb_params,
-            )
+            try:
+                lgbm_params = read_frozen_hyperparameters(models_root, market, horizon, "lightgbm")
+                xgb_params = read_frozen_hyperparameters(models_root, market, horizon, "xgboost")
+                verdicts = evaluate_and_promote(
+                    models_root=models_root,
+                    panel_by_market=panel_by_market,
+                    champion_model_paths=combo_champion_paths,
+                    challenger_trained_date=data_as_of,
+                    merged_to_active=merged_to_active,
+                    lgbm_params=lgbm_params,
+                    xgb_params=xgb_params,
+                )
+            except Exception:  # noqa: BLE001 — 조합별 격리(High-2 수정)
+                # High-2 수정: 한 (market,horizon) 조합의 실패(예: 매니페스트는
+                # 있으나 아티팩트가 디스크에서 실제로 사라진 경우)가 다른 조합의
+                # verdict까지 전부 폐기시키지 않는다 — 이 조합만 건너뛰고 나머지
+                # 조합은 계속 판정한다. 이 스킵은 챔피언 부재로 인한 정상 스킵
+                # (AC-ATG-009)과 다른 상태이므로 원인을 명시한 경고 로그로 구분한다.
+                logger.warning(
+                    "gate combo evaluation failed, skipping market=%s horizon=%s",
+                    market,
+                    horizon,
+                    exc_info=True,
+                )
+                continue
             merged_verdicts.update(verdicts)
     return merged_verdicts
 

@@ -348,6 +348,66 @@ class TestRunGate:
         assert call_log == []
         assert verdicts == {}
 
+    def test_one_combo_failure_does_not_discard_other_combo_verdicts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        """High-2 수정: (market,horizon) 한 조합의 evaluate_and_promote() 실패
+        (예: 매니페스트는 있으나 아티팩트가 디스크에서 사라진 경우)가 나머지
+        조합의 verdict까지 전부 폐기시키지 않는다 — 해당 조합만 건너뛰고
+        나머지는 정상 판정된다."""
+        models_root = tmp_path / "models"
+        trained_date = date(2026, 8, 22)
+        # domestic/60은 실패하게 하고, overseas/20은 정상 성공하게 한다.
+        for market, horizon in (("domestic", 60), ("overseas", 20)):
+            _write_champion_manifest(models_root, market, horizon, "xgboost", trained_date)
+            model_path = _write_champion_artifact(
+                models_root, market, horizon, "xgboost", trained_date
+            )
+            sidecar_path = campaign_metrics_module.sidecar_path_for(model_path)
+            sidecar_path.write_text(
+                json.dumps({"frozen_hyperparameters": {"n_estimators": 5}}), encoding="utf-8"
+            )
+
+        fake_panel = pd.DataFrame(
+            {"stock_code": ["S0"], "trade_date": [pd.Timestamp("2026-01-01")]}
+        )
+        monkeypatch.setattr(
+            gate_module.campaign_module,
+            "_assemble_campaign_dataset",
+            lambda *args, **kwargs: fake_panel,
+        )
+
+        def fake_evaluate_and_promote(**kwargs):
+            (market, horizon, algorithm), _path = next(iter(kwargs["champion_model_paths"].items()))
+            if (market, horizon) == ("domestic", 60):
+                raise FileNotFoundError("champion artifact missing on disk")
+            verdict = PromotionVerdict(
+                market=market,
+                horizon=horizon,
+                algorithm=algorithm,
+                promoted=True,
+                challenger_rank_ic=0.05,
+                champion_rank_ic=0.01,
+                challenger_trained_date=kwargs["challenger_trained_date"],
+            )
+            return {(market, horizon, algorithm): verdict}
+
+        monkeypatch.setattr(gate_module, "evaluate_and_promote", fake_evaluate_and_promote)
+
+        with caplog.at_level("WARNING"):
+            verdicts = run_gate(
+                trainer_engine=MagicMock(),
+                models_root=models_root,
+                cache_dir=tmp_path / "cache",
+                data_as_of=trained_date,
+                feature_code_version="v1",
+                calendar_code="KRX",
+                merged_to_active=True,
+            )
+
+        assert set(verdicts.keys()) == {("overseas", 20, "xgboost")}
+        assert any("gate combo evaluation failed" in record.message for record in caplog.records)
+
 
 class TestGateMain:
     def test_returns_zero_and_prints_verdict_json_on_success(
