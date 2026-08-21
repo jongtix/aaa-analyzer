@@ -3,17 +3,26 @@
 """
 
 import json
+import subprocess
+import sys
 from datetime import date
 from pathlib import Path
+from unittest.mock import MagicMock
+
+import pandas as pd
+import pytest
 
 from analyzer.orchestration import activation as activation_module
 from analyzer.orchestration.promotion_gate import PromotionVerdict
 from analyzer.training import campaign_metrics as campaign_metrics_module
+from analyzer.training import gate as gate_module
 from analyzer.training import persistence as persistence_module
 from analyzer.training.gate import (
     deserialize_verdicts,
+    parse_args,
     read_frozen_hyperparameters,
     resolve_champion_model_paths,
+    run_gate,
     serialize_verdicts,
     warn_dangling_champions,
 )
@@ -195,3 +204,232 @@ class TestVerdictSerializationRoundtrip:
 
     def test_roundtrip_empty_mapping(self):
         assert deserialize_verdicts(serialize_verdicts({})) == {}
+
+
+class TestParseArgs:
+    """REQ-ATG-008: 게이트 CLI 인자 관례 — train.py CLI 인자 관례 계승."""
+
+    def test_parses_required_arguments(self):
+        args = parse_args(
+            [
+                "--models-root",
+                "/tmp/models",
+                "--cache-dir",
+                "/tmp/cache",
+                "--data-as-of",
+                "2026-08-22",
+                "--feature-code-version",
+                "v1",
+            ]
+        )
+
+        assert args.models_root == Path("/tmp/models")
+        assert args.cache_dir == Path("/tmp/cache")
+        assert args.data_as_of == date(2026, 8, 22)
+        assert args.feature_code_version == "v1"
+        assert args.calendar_code == "KRX"
+        assert args.merged_to_active is True
+
+    def test_accepts_no_merged_to_active_flag(self):
+        args = parse_args(
+            [
+                "--models-root",
+                "/tmp/models",
+                "--cache-dir",
+                "/tmp/cache",
+                "--data-as-of",
+                "2026-08-22",
+                "--feature-code-version",
+                "v1",
+                "--no-merged-to-active",
+            ]
+        )
+
+        assert args.merged_to_active is False
+
+
+class TestRunGate:
+    """M2: 게이트 CLI 본체 — 시장별 패널 조립(캐시 재사용) + (market,horizon) 단위
+    반복 evaluate_and_promote() 호출(§B 리스크 1) + verdict 병합."""
+
+    def test_calls_evaluate_and_promote_once_per_combo_with_champion(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        models_root = tmp_path / "models"
+        trained_date = date(2026, 8, 22)
+        # domestic/60·overseas/20·overseas/60 xgboost만 챔피언 보유(라이브 실측 정합).
+        for market, horizon in (("domestic", 60), ("overseas", 20), ("overseas", 60)):
+            _write_champion_manifest(models_root, market, horizon, "xgboost", trained_date)
+            model_path = _write_champion_artifact(
+                models_root, market, horizon, "xgboost", trained_date
+            )
+            sidecar_path = campaign_metrics_module.sidecar_path_for(model_path)
+            sidecar_path.write_text(
+                json.dumps({"frozen_hyperparameters": {"n_estimators": 5}}), encoding="utf-8"
+            )
+
+        fake_panel = pd.DataFrame(
+            {"stock_code": ["S0"], "trade_date": [pd.Timestamp("2026-01-01")]}
+        )
+        monkeypatch.setattr(
+            gate_module.campaign_module,
+            "_assemble_campaign_dataset",
+            lambda *args, **kwargs: fake_panel,
+        )
+
+        call_log: list[dict] = []
+
+        def fake_evaluate_and_promote(**kwargs):
+            call_log.append(kwargs)
+            (market, horizon, algorithm), _path = next(iter(kwargs["champion_model_paths"].items()))
+            verdict = PromotionVerdict(
+                market=market,
+                horizon=horizon,
+                algorithm=algorithm,
+                promoted=True,
+                challenger_rank_ic=0.05,
+                champion_rank_ic=0.01,
+                challenger_trained_date=kwargs["challenger_trained_date"],
+            )
+            return {(market, horizon, algorithm): verdict}
+
+        monkeypatch.setattr(gate_module, "evaluate_and_promote", fake_evaluate_and_promote)
+
+        verdicts = run_gate(
+            trainer_engine=MagicMock(),
+            models_root=models_root,
+            cache_dir=tmp_path / "cache",
+            data_as_of=trained_date,
+            feature_code_version="v1",
+            calendar_code="KRX",
+            merged_to_active=True,
+        )
+
+        # domestic/60, overseas/20, overseas/60 — 챔피언 보유 3개 조합만 호출된다.
+        assert len(call_log) == 3
+        assert set(verdicts.keys()) == {
+            ("domestic", 60, "xgboost"),
+            ("overseas", 20, "xgboost"),
+            ("overseas", 60, "xgboost"),
+        }
+        for kwargs in call_log:
+            assert kwargs["challenger_trained_date"] == trained_date
+            assert kwargs["xgb_params"] == {"n_estimators": 5}
+
+    def test_skips_combo_without_any_champion(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        models_root = tmp_path / "models"
+        fake_panel = pd.DataFrame(
+            {"stock_code": ["S0"], "trade_date": [pd.Timestamp("2026-01-01")]}
+        )
+        monkeypatch.setattr(
+            gate_module.campaign_module,
+            "_assemble_campaign_dataset",
+            lambda *args, **kwargs: fake_panel,
+        )
+        call_log: list[dict] = []
+        monkeypatch.setattr(
+            gate_module,
+            "evaluate_and_promote",
+            lambda **kwargs: call_log.append(kwargs) or {},
+        )
+
+        verdicts = run_gate(
+            trainer_engine=MagicMock(),
+            models_root=models_root,
+            cache_dir=tmp_path / "cache",
+            data_as_of=date(2026, 8, 22),
+            feature_code_version="v1",
+            calendar_code="KRX",
+            merged_to_active=True,
+        )
+
+        assert call_log == []
+        assert verdicts == {}
+
+
+class TestGateMain:
+    def test_returns_zero_and_prints_verdict_json_on_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ):
+        monkeypatch.setattr(gate_module, "build_trainer_engine", lambda: MagicMock())
+        verdict = PromotionVerdict(
+            market="domestic",
+            horizon=60,
+            algorithm="xgboost",
+            promoted=True,
+            challenger_rank_ic=0.05,
+            champion_rank_ic=0.01,
+            challenger_trained_date=date(2026, 8, 22),
+        )
+        monkeypatch.setattr(
+            gate_module, "run_gate", lambda **kwargs: {("domestic", 60, "xgboost"): verdict}
+        )
+
+        exit_code = gate_module.main(
+            [
+                "--models-root",
+                str(tmp_path / "models"),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--data-as-of",
+                "2026-08-22",
+                "--feature-code-version",
+                "v1",
+            ]
+        )
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == [
+            {
+                "market": "domestic",
+                "horizon": 60,
+                "algorithm": "xgboost",
+                "promoted": True,
+                "challenger_rank_ic": 0.05,
+                "champion_rank_ic": 0.01,
+                "challenger_trained_date": "2026-08-22",
+            }
+        ]
+
+    def test_returns_one_on_exception_and_logs_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ):
+        monkeypatch.setattr(gate_module, "build_trainer_engine", lambda: MagicMock())
+
+        def _raise(**kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(gate_module, "run_gate", _raise)
+
+        exit_code = gate_module.main(
+            [
+                "--models-root",
+                str(tmp_path / "models"),
+                "--cache-dir",
+                str(tmp_path / "cache"),
+                "--data-as-of",
+                "2026-08-22",
+                "--feature-code-version",
+                "v1",
+            ]
+        )
+
+        assert exit_code == 1
+        # stdout에는 JSON 외 텍스트가 섞이지 않아야 한다(§B 리스크 2).
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
+
+class TestGateCliSubprocessInvocation:
+    def test_module_invocation_exits_nonzero_without_required_args(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "analyzer.training.gate"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        assert result.returncode != 0
