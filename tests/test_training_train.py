@@ -295,6 +295,278 @@ class TestRunTrainingPipelineOrchestration:
         assert len(result.saved_combos) == len(expected_combos)
 
 
+class TestFrozenParamsByComboInjection:
+    """REQ-ATG-011: 챔피언 동결 하이퍼파라미터를 (market,horizon,algorithm)별로
+    주간 학습 파이프라인에 주입한다 — 게이트 챌린저(gate.py)와 동일 리더를
+    공유해 조합별로 동일 파라미터임을 보장한다(AC-ATG-011)."""
+
+    def test_none_preserves_single_call_backward_compat(self, tmp_path: Path):
+        with (
+            patch.object(
+                train_module,
+                "fetch_market_calendar",
+                return_value=TradingCalendar(calendar_code="KRX", trading_days=frozenset()),
+            ),
+            patch.object(
+                train_module,
+                "fetch_stock_universe",
+                return_value=pd.DataFrame({"stock_code": [], "grade": [], "delisted_at": []}),
+            ),
+            patch.object(train_module, "fetch_market_data", return_value=({}, {}, {})),
+            patch.object(
+                train_module.cache_module,
+                "assemble_dataset_cached",
+                return_value=_dummy_assembled_dataset(),
+            ),
+            patch.object(train_module, "train_pooled_models", return_value={}) as tpm_spy,
+        ):
+            result = run_training_pipeline(
+                trainer_engine=MagicMock(),
+                calendar_code="KRX",
+                cache_dir=tmp_path / "cache",
+                models_root=tmp_path / "models",
+                data_as_of=date(2026, 8, 8),
+                feature_code_version="v1",
+            )
+
+        assert result.success is True
+        tpm_spy.assert_called_once()
+        _, kwargs = tpm_spy.call_args
+        assert kwargs["lgbm_params"] is None
+        assert kwargs["xgb_params"] is None
+
+    def test_frozen_params_grouped_calls_train_pooled_models_per_distinct_signature(
+        self, tmp_path: Path
+    ):
+        trained_date = date(2026, 8, 8)
+        frozen_params_by_combo = {
+            ("domestic", 60, "xgboost"): {"n_estimators": 38},
+            ("overseas", 20, "xgboost"): {"n_estimators": 71},
+            ("overseas", 60, "xgboost"): {"n_estimators": 71},  # overseas/20과 동일 시그니처
+        }
+
+        call_kwargs_log: list[dict] = []
+        saved_combos_log: list[tuple] = []
+
+        def _fake_train_pooled_models(data_by_combo, lgbm_params=None, xgb_params=None, **_):
+            call_kwargs_log.append({"lgbm_params": lgbm_params, "xgb_params": xgb_params})
+            models: dict[tuple, object] = {}
+            for market, horizon in data_by_combo:
+                models[(market, horizon, "lightgbm")] = MagicMock(spec=lgb.LGBMRegressor)
+                models[(market, horizon, "xgboost")] = MagicMock()
+            return models
+
+        def _fake_save_model_native(model, models_root, market, horizon, algorithm, trained_date):
+            from analyzer.training.persistence import SavedModel
+
+            saved_combos_log.append((market, horizon, algorithm))
+            path = tmp_path / f"{market}_{horizon}_{algorithm}.bin"
+            return SavedModel(model_path=path, sidecar_path=path, sha256="deadbeef")
+
+        with (
+            patch.object(
+                train_module,
+                "fetch_market_calendar",
+                return_value=TradingCalendar(calendar_code="KRX", trading_days=frozenset()),
+            ),
+            patch.object(
+                train_module,
+                "fetch_stock_universe",
+                return_value=pd.DataFrame({"stock_code": [], "grade": [], "delisted_at": []}),
+            ),
+            patch.object(train_module, "fetch_market_data", return_value=({}, {}, {})),
+            patch.object(
+                train_module.cache_module,
+                "assemble_dataset_cached",
+                return_value=_dummy_assembled_dataset(),
+            ),
+            patch.object(
+                train_module, "train_pooled_models", side_effect=_fake_train_pooled_models
+            ),
+            patch.object(
+                train_module.persistence_module,
+                "save_model_native",
+                side_effect=_fake_save_model_native,
+            ),
+        ):
+            result = run_training_pipeline(
+                trainer_engine=MagicMock(),
+                calendar_code="KRX",
+                cache_dir=tmp_path / "cache",
+                models_root=tmp_path / "models",
+                data_as_of=trained_date,
+                feature_code_version="v1",
+                frozen_params_by_combo=frozen_params_by_combo,
+            )
+
+        assert result.success is True
+        # domestic/20(기본값), domestic/60(38), overseas/20+overseas/60(71 공유) — 3개 그룹.
+        assert len(call_kwargs_log) == 3
+        xgb_param_values = [k["xgb_params"] for k in call_kwargs_log]
+        assert {"n_estimators": 38} in xgb_param_values
+        assert {"n_estimators": 71} in xgb_param_values
+        assert None in xgb_param_values
+        # 매 조합이 정확히 1회씩만 저장되어야 한다(그룹 간 중복 저장 없음).
+        expected_combos = {
+            (m, h, algo) for m in MARKETS for h in HORIZONS for algo in ("lightgbm", "xgboost")
+        }
+        assert set(saved_combos_log) == expected_combos
+        assert len(saved_combos_log) == len(expected_combos)
+
+    def test_combo_without_frozen_entry_falls_back_to_base_params(self, tmp_path: Path):
+        from analyzer.training.persistence import SavedModel
+
+        call_kwargs_log: list[dict] = []
+
+        def _fake_train_pooled_models(data_by_combo, lgbm_params=None, xgb_params=None, **_):
+            call_kwargs_log.append({"lgbm_params": lgbm_params, "xgb_params": xgb_params})
+            return {
+                (m, h, algo): MagicMock()
+                for m, h in data_by_combo
+                for algo in ("lightgbm", "xgboost")
+            }
+
+        def _fake_save_model_native(model, models_root, market, horizon, algorithm, trained_date):
+            path = tmp_path / f"{market}_{horizon}_{algorithm}.bin"
+            return SavedModel(model_path=path, sidecar_path=path, sha256="deadbeef")
+
+        with (
+            patch.object(
+                train_module,
+                "fetch_market_calendar",
+                return_value=TradingCalendar(calendar_code="KRX", trading_days=frozenset()),
+            ),
+            patch.object(
+                train_module,
+                "fetch_stock_universe",
+                return_value=pd.DataFrame({"stock_code": [], "grade": [], "delisted_at": []}),
+            ),
+            patch.object(train_module, "fetch_market_data", return_value=({}, {}, {})),
+            patch.object(
+                train_module.cache_module,
+                "assemble_dataset_cached",
+                return_value=_dummy_assembled_dataset(),
+            ),
+            patch.object(
+                train_module, "train_pooled_models", side_effect=_fake_train_pooled_models
+            ),
+            patch.object(
+                train_module.persistence_module,
+                "save_model_native",
+                side_effect=_fake_save_model_native,
+            ),
+        ):
+            run_training_pipeline(
+                trainer_engine=MagicMock(),
+                calendar_code="KRX",
+                cache_dir=tmp_path / "cache",
+                models_root=tmp_path / "models",
+                data_as_of=date(2026, 8, 8),
+                feature_code_version="v1",
+                frozen_params_by_combo={},  # 빈 매핑 — 전 조합이 기본값으로 폴백
+            )
+
+        assert len(call_kwargs_log) == 1
+        assert call_kwargs_log[0] == {"lgbm_params": None, "xgb_params": None}
+
+
+class TestParamsFromActiveMetaFlag:
+    """REQ-ATG-011: `--params-from-active-meta` 플래그 — gate.py의 리더를
+    재사용해 frozen_params_by_combo를 구성해 run_training_pipeline()에
+    전달한다(AC-ATG-011 "게이트 챌린저와 동일 리더 공유")."""
+
+    def test_flag_absent_forwards_none_frozen_params(self, tmp_path: Path):
+        captured: dict = {}
+
+        def _fake_run_training_pipeline(**kwargs):
+            captured.update(kwargs)
+            return TrainingPipelineResult(success=True, saved_model_paths=[])
+
+        with (
+            patch.object(train_module, "build_trainer_engine", return_value=MagicMock()),
+            patch.object(
+                train_module, "run_training_pipeline", side_effect=_fake_run_training_pipeline
+            ),
+        ):
+            main(
+                [
+                    "--cache-dir",
+                    str(tmp_path / "cache"),
+                    "--models-root",
+                    str(tmp_path / "models"),
+                    "--data-as-of",
+                    "2026-08-08",
+                    "--feature-code-version",
+                    "v1",
+                ]
+            )
+
+        assert captured["frozen_params_by_combo"] is None
+
+    def test_flag_present_reads_frozen_params_via_gate_reader(self, tmp_path: Path):
+        import json as json_module
+
+        from analyzer.orchestration import activation as activation_module
+        from analyzer.training import campaign_metrics as campaign_metrics_module
+        from analyzer.training import persistence as persistence_module
+
+        active_models_root = tmp_path / "active_models"
+        trained_date = date(2026, 8, 19)
+        activation_module.write_activation_manifest(
+            active_models_root,
+            activation_module.ActivationManifest(
+                market="domestic",
+                horizon=60,
+                algorithm="xgboost",
+                trained_date=trained_date,
+                sidecar_sha256="x",
+                promoted_at="2026-08-19T00:00:00+00:00",
+                promotion_basis={},
+            ),
+        )
+        model_dir = persistence_module.model_dir(active_models_root, "domestic", 60, "xgboost")
+        model_dir.mkdir(parents=True, exist_ok=True)
+        model_path = model_dir / persistence_module.model_filename(
+            "domestic", 60, "xgboost", trained_date
+        )
+        model_path.write_text("dummy", encoding="utf-8")
+        sidecar_path = campaign_metrics_module.sidecar_path_for(model_path)
+        sidecar_path.write_text(
+            json_module.dumps({"frozen_hyperparameters": {"n_estimators": 38}}), encoding="utf-8"
+        )
+
+        captured: dict = {}
+
+        def _fake_run_training_pipeline(**kwargs):
+            captured.update(kwargs)
+            return TrainingPipelineResult(success=True, saved_model_paths=[])
+
+        with (
+            patch.object(train_module, "build_trainer_engine", return_value=MagicMock()),
+            patch.object(
+                train_module, "run_training_pipeline", side_effect=_fake_run_training_pipeline
+            ),
+        ):
+            main(
+                [
+                    "--cache-dir",
+                    str(tmp_path / "cache"),
+                    "--models-root",
+                    str(tmp_path / "models"),
+                    "--data-as-of",
+                    "2026-08-08",
+                    "--feature-code-version",
+                    "v1",
+                    "--params-from-active-meta",
+                    str(active_models_root),
+                ]
+            )
+
+        assert captured["frozen_params_by_combo"] == {
+            ("domestic", 60, "xgboost"): {"n_estimators": 38}
+        }
+
+
 class TestFetchStockUniverseMarketCodeMapping:
     """`stocks.market`은 거래소 코드(KOSPI/KOSDAQ/NYSE/NASDAQ/AMEX)로 저장된다
     (aaa-collector `Market` enum 실측) — `KRX`/`US`는 지수 종목(`asset_type=INDEX`)

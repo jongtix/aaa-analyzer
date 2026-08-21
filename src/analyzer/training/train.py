@@ -29,6 +29,7 @@ SPEC의 PRESERVE 대상(plan.md §D, `_DB_USER`→`_ANALYZER_DB_USER` 리네임
 """
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -58,7 +59,7 @@ from analyzer.training import cache as cache_module
 from analyzer.training import dataset as dataset_module
 from analyzer.training import persistence as persistence_module
 from analyzer.training.db import build_trainer_engine
-from analyzer.training.models import HORIZONS, MARKETS, train_pooled_models
+from analyzer.training.models import HORIZONS, MARKETS, PooledModel, train_pooled_models
 
 logger = get_logger(__name__)
 
@@ -299,6 +300,51 @@ def _save_quantile_model(
         )
 
 
+def _persist_trained_models(
+    trained_models: Mapping[tuple, PooledModel],
+    models_root: Path,
+    trained_date: date,
+    saved_paths: list[Path],
+    saved_combos: list[tuple[str, int, str]],
+    seen_combos: set[tuple[str, int, str]],
+) -> None:
+    """`trained_models`를 저장하고 `saved_paths`/`saved_combos`/`seen_combos`에
+    누적한다 — `run_training_pipeline()`의 저장 루프를 추출한 헬퍼(REQ-ATG-011
+    그룹별 반복 호출과 기존 단일 호출 양쪽이 공유한다, 동작 불변 리팩터)."""
+    for model_key, model in trained_models.items():
+        market, horizon = model_key[0], model_key[1]
+        tag = model_key[2]
+        algorithm = _resolve_algorithm(model_key)
+        if tag == "lightgbm_quantile":
+            alpha = model_key[3]
+            assert isinstance(model, lgb.LGBMRegressor)
+            saved = _save_quantile_model(model, models_root, market, horizon, alpha, trained_date)
+        else:
+            saved = persistence_module.save_model_native(
+                model, models_root, market, horizon, algorithm, trained_date
+            )
+        # REQ-ATO-019: 모델 저장 경로 단계 전이 로그.
+        logger.info(
+            "model saved market=%s horizon=%s algorithm=%s path=%s",
+            market,
+            horizon,
+            algorithm,
+            saved.model_path,
+            extra={"stage_marker": True},
+        )
+        saved_paths.append(saved.model_path)
+        combo = (market, horizon, algorithm)
+        if combo not in seen_combos:
+            seen_combos.add(combo)
+            saved_combos.append(combo)
+
+
+def _params_group_key(params: Mapping[str, object] | None) -> str:
+    """REQ-ATG-011: 파라미터 매핑을 해시 가능한 그룹 키로 정규화한다
+    (딕셔너리 순서 무관 — `json.dumps(sort_keys=True)`)."""
+    return json.dumps(dict(params) if params else {}, sort_keys=True, default=str)
+
+
 def run_training_pipeline(
     *,
     trainer_engine: Engine,
@@ -309,6 +355,7 @@ def run_training_pipeline(
     feature_code_version: str,
     lgbm_params: Mapping[str, object] | None = None,
     xgb_params: Mapping[str, object] | None = None,
+    frozen_params_by_combo: Mapping[tuple[str, int, str], Mapping[str, object]] | None = None,
 ) -> TrainingPipelineResult:
     """학습 파이프라인 전체를 순서대로 실행한다(design.md §4 진입점 계약).
 
@@ -318,6 +365,16 @@ def run_training_pipeline(
     모델(8 포인트+8 분위수 보조)을 학습해 네이티브 포맷으로 저장한다.
     예외가 발생하면 잡아 `TrainingPipelineResult(success=False, error=...)`로
     반환한다 — CLI 진입점(`main()`)이 이를 종료코드로 변환한다.
+
+    `frozen_params_by_combo`(REQ-ATG-011, additive): (market,horizon,algorithm)별
+    동결 하이퍼파라미터 매핑 — 지정되면(`None`이 아니면) (market,horizon) 조합을
+    유효 파라미터 시그니처별로 묶어 `train_pooled_models()`를 그룹당 1회씩
+    반복 호출한다(`models.py`의 "data_by_combo는 정확히 4개 조합" 계약(PRESERVE)
+    을 매 호출에서 만족시키면서도, 그룹별로 다른 `lgbm_params`/`xgb_params`를
+    적용한다 — 게이트 CLI(`training/gate.py` `run_gate()`)와 동일한 원칙).
+    매핑에 없는 조합은 이 함수의 `lgbm_params`/`xgb_params`(기본값)로
+    폴백한다(챔피언 부재 조합 현행 유지, REQ-ATG-011). `None`(미지정) 시
+    기존 단일 호출 동작을 그대로 보존한다(하위 호환).
     """
     try:
         data_by_combo: dict[tuple[str, int], tuple[np.ndarray, np.ndarray]] = {}
@@ -339,39 +396,48 @@ def run_training_pipeline(
                 )
                 data_by_combo[(market, horizon)] = (x.to_numpy(), y.to_numpy())
 
-        trained_models = train_pooled_models(
-            data_by_combo, lgbm_params=lgbm_params, xgb_params=xgb_params
-        )
-
         saved_paths: list[Path] = []
         saved_combos: list[tuple[str, int, str]] = []
         seen_combos: set[tuple[str, int, str]] = set()
-        for model_key, model in trained_models.items():
-            market, horizon = model_key[0], model_key[1]
-            tag = model_key[2]
-            algorithm = _resolve_algorithm(model_key)
-            if tag == "lightgbm_quantile":
-                alpha = model_key[3]
-                assert isinstance(model, lgb.LGBMRegressor)
-                saved = _save_quantile_model(model, models_root, market, horizon, alpha, data_as_of)
-            else:
-                saved = persistence_module.save_model_native(
-                    model, models_root, market, horizon, algorithm, data_as_of
-                )
-            # REQ-ATO-019: 모델 저장 경로 단계 전이 로그.
-            logger.info(
-                "model saved market=%s horizon=%s algorithm=%s path=%s",
-                market,
-                horizon,
-                algorithm,
-                saved.model_path,
-                extra={"stage_marker": True},
+
+        if frozen_params_by_combo is None:
+            trained_models = train_pooled_models(
+                data_by_combo, lgbm_params=lgbm_params, xgb_params=xgb_params
             )
-            saved_paths.append(saved.model_path)
-            combo = (market, horizon, algorithm)
-            if combo not in seen_combos:
-                seen_combos.add(combo)
-                saved_combos.append(combo)
+            _persist_trained_models(
+                trained_models, models_root, data_as_of, saved_paths, saved_combos, seen_combos
+            )
+        else:
+            groups: dict[tuple[str, str], list[tuple[str, int]]] = {}
+            group_params: dict[
+                tuple[str, str], tuple[Mapping[str, object] | None, Mapping[str, object] | None]
+            ] = {}
+            for market in MARKETS:
+                for horizon in HORIZONS:
+                    effective_lgbm = frozen_params_by_combo.get(
+                        (market, horizon, "lightgbm"), lgbm_params
+                    )
+                    effective_xgb = frozen_params_by_combo.get(
+                        (market, horizon, "xgboost"), xgb_params
+                    )
+                    key = (_params_group_key(effective_lgbm), _params_group_key(effective_xgb))
+                    groups.setdefault(key, []).append((market, horizon))
+                    group_params[key] = (effective_lgbm, effective_xgb)
+
+            for key, combos in groups.items():
+                group_lgbm, group_xgb = group_params[key]
+                trained_models = train_pooled_models(
+                    data_by_combo, lgbm_params=group_lgbm, xgb_params=group_xgb
+                )
+                owned = set(combos)
+                filtered = {
+                    model_key: model
+                    for model_key, model in trained_models.items()
+                    if (model_key[0], model_key[1]) in owned
+                }
+                _persist_trained_models(
+                    filtered, models_root, data_as_of, saved_paths, saved_combos, seen_combos
+                )
 
         return TrainingPipelineResult(
             success=True, saved_model_paths=saved_paths, saved_combos=saved_combos
@@ -391,6 +457,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--models-root", type=Path, required=True)
     parser.add_argument("--data-as-of", type=date.fromisoformat, required=True)
     parser.add_argument("--feature-code-version", required=True)
+    parser.add_argument(
+        "--params-from-active-meta",
+        type=Path,
+        default=None,
+        help=(
+            "REQ-ATG-011: 지정 시 이 경로의 활성 챔피언 .meta.json 사이드카에서 "
+            "조합별 frozen_hyperparameters를 읽어 주간 학습에 주입한다(게이트 "
+            "챌린저와 동일 리더 공유). 미지정 시 라이브러리 기본값으로 학습한다."
+        ),
+    )
     args = parser.parse_args(argv)
 
     # REQ-ATO-012/013/014: NAS 오케스트레이터가 전달한 run_id를 trace_id로
@@ -402,6 +478,24 @@ def main(argv: list[str] | None = None) -> int:
 
     engine = build_trainer_engine()
 
+    frozen_params_by_combo: dict[tuple[str, int, str], Mapping[str, object]] | None = None
+    if args.params_from_active_meta is not None:
+        # 지연 임포트(REQ-ATG-011): gate.py는 module-level에서 campaign.py를
+        # 임포트하고, campaign.py는 module-level에서 이 모듈(train.py)을
+        # 임포트한다 — train→gate→campaign→train 순환을 피하기 위해 main()
+        # 함수 본문에서만 지연 임포트한다.
+        from analyzer.training.gate import read_frozen_hyperparameters
+
+        frozen_params_by_combo = {}
+        for market in MARKETS:
+            for horizon in HORIZONS:
+                for algorithm in ("lightgbm", "xgboost"):
+                    frozen = read_frozen_hyperparameters(
+                        args.params_from_active_meta, market, horizon, algorithm
+                    )
+                    if frozen is not None:
+                        frozen_params_by_combo[(market, horizon, algorithm)] = frozen
+
     result = run_training_pipeline(
         trainer_engine=engine,
         calendar_code=args.calendar_code,
@@ -409,6 +503,7 @@ def main(argv: list[str] | None = None) -> int:
         models_root=args.models_root,
         data_as_of=args.data_as_of,
         feature_code_version=args.feature_code_version,
+        frozen_params_by_combo=frozen_params_by_combo,
     )
     if not result.success:
         print(f"학습 파이프라인 실패: {result.error}", file=sys.stderr)

@@ -290,6 +290,7 @@ def build_remote_dispatch_command(
     db_tunnel_port: int = 22,
     db_tunnel_local_port: int = 3306,
     db_tunnel_remote_port: int = 3306,
+    params_from_active_meta: Path | None = None,
 ) -> str:
     """REQ-ATA-030/031/032: 멱등 SMB 마운트 확인 → MySQL 터널 수립 →
     TRAIN-001 CLI 원격 호출(스테이징 경로) → 터널 해제(trap)까지 단일 원격
@@ -327,6 +328,12 @@ def build_remote_dispatch_command(
     아니라 db_tunnel이 연 로컬 포워딩(`127.0.0.1:{db_tunnel_local_port}`)으로
     고정한다 — 이 값들이 없으면 원격 학습 CLI가 MissingConfigError로 즉시
     실패한다(수동 실행 실측, 2026-08-13).
+
+    `params_from_active_meta`(REQ-ATG-011, additive, §D M3 허용 예외): 지정되면
+    `train.py`의 `--params-from-active-meta <경로>` 플래그를 원격 학습 CLI
+    호출에 추가한다 — 주간 원격 학습이 챔피언 동결 하이퍼파라미터로 학습하게
+    된다. 미지정(기본값 `None`) 시 기존 명령 문자열과 byte-identical하다
+    (하위 호환).
     """
     quoted_db_tunnel_key_path = shlex.quote(str(db_tunnel_key_path))
     quoted_db_tunnel_username = shlex.quote(db_tunnel_username)
@@ -344,6 +351,11 @@ def build_remote_dispatch_command(
     trainer_log_path = trainer_log_base_dir / f"trainer_{run_id}.log"
     quoted_trainer_log_path = shlex.quote(str(trainer_log_path))
     quoted_trainer_log_base_dir = shlex.quote(str(trainer_log_base_dir))
+    params_from_active_meta_arg = (
+        f" --params-from-active-meta {shlex.quote(str(params_from_active_meta))}"
+        if params_from_active_meta is not None
+        else ""
+    )
 
     tunnel_command = (
         f"ssh -f -N -o BatchMode=yes -o ExitOnForwardFailure=yes "
@@ -370,7 +382,8 @@ def build_remote_dispatch_command(
         f"--cache-dir {quoted_cache_dir} "
         f"--models-root {quoted_staging_models_root} "
         f"--data-as-of {quoted_data_as_of} "
-        f"--feature-code-version {quoted_feature_code_version} "
+        f"--feature-code-version {quoted_feature_code_version}"
+        f"{params_from_active_meta_arg} "
         # REQ-ATO-004/007: stdout/stderr 전체를 트레이너 파일에 원문 그대로
         # 영속 기록하면서(tee), 동일 바이트가 여전히 SSH 채널(stdout)로도
         # 흘러가게 유지한다 — 채널 드레인 루프(REQ-ATO-001)가 그 스트림을

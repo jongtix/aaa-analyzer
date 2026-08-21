@@ -699,6 +699,54 @@ class TestBuildRemoteDispatchCommand:
         assert f"TRAIN_RUN_ID={malicious_run_id} " not in command
 
 
+class TestBuildRemoteDispatchCommandParamsFromActiveMeta:
+    """REQ-ATG-011: 동결 하이퍼파라미터 주입 플래그를 원격 명령 빌더에
+    additive로 전달한다 — 기존 함수 시그니처/동작은 무수정(§D M3 허용 예외)."""
+
+    def _base_kwargs(self) -> dict:
+        return dict(
+            staging_models_root=Path("/staging/run-1"),
+            calendar_code="KRX",
+            cache_dir=Path("/cache"),
+            data_as_of=date(2026, 8, 11),
+            feature_code_version="v1",
+            db_tunnel_host="nas-host",
+            db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-1",
+        )
+
+    def test_flag_absent_preserves_existing_command_unchanged(self):
+        """미지정 시(기본값 None) 기존 동작과 동일 — 하위 호환."""
+        without_flag = build_remote_dispatch_command(**self._base_kwargs())
+        with_explicit_none = build_remote_dispatch_command(
+            **self._base_kwargs(), params_from_active_meta=None
+        )
+
+        assert without_flag == with_explicit_none
+        assert "--params-from-active-meta" not in without_flag
+
+    def test_flag_present_appends_params_from_active_meta_arg(self):
+        command = build_remote_dispatch_command(
+            **self._base_kwargs(), params_from_active_meta=Path("/models/active")
+        )
+
+        assert "--params-from-active-meta /models/active" in command
+
+    def test_flag_value_is_shell_quoted(self):
+        malicious_path = Path("/models/active; touch /tmp/pwned")
+        command = build_remote_dispatch_command(
+            **self._base_kwargs(), params_from_active_meta=malicious_path
+        )
+
+        assert shlex.quote(str(malicious_path)) in command
+        assert f"--params-from-active-meta {malicious_path} " not in command
+
+
 class TestPromoteStagingToActive:
     """plan.md §B.5(D6) 사전 차단 설계 — SSH 종료코드 0 확인 후에만 호출되어야 한다."""
 
