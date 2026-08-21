@@ -8,6 +8,7 @@ REQ-ATG-001/002/003/004/005/006).
 CLI 양쪽에 동일하게 주입된다.
 """
 
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -16,6 +17,8 @@ import pytest
 from prometheus_client import CollectorRegistry
 
 from analyzer.api import main as main_module
+from analyzer.orchestration import manual_run as manual_run_module
+from analyzer.orchestration import runner as runner_module
 from analyzer.orchestration.config import AutomationConfig
 from analyzer.orchestration.metrics import TrainingMetrics
 from analyzer.orchestration.runner import RunOutcome
@@ -25,6 +28,7 @@ from analyzer.orchestration.scheduler import (
     WEEKLY_FULL_RETRAIN_JOB_ID,
     SchedulerRegistry,
 )
+from analyzer.orchestration.ssh_dispatch import CommandResult
 
 
 def _make_config(tmp_path: Path) -> AutomationConfig:
@@ -55,6 +59,39 @@ def _make_config(tmp_path: Path) -> AutomationConfig:
         mysql_trainer_password="trainer-secret",
         trainer_log_base_dir=tmp_path / "logs" / "aaa-analyzer",
     )
+
+
+class _FakeWolSender:
+    """실 UDP 브로드캐스트를 대체하는 페이크(항상 즉시 성공)."""
+
+    def send(self, mac_address: str) -> bool:
+        return True
+
+
+class _FakeConnection:
+    """실 SSH 연결을 대체하는 페이크 — 실행된 명령을 그대로 기록한다."""
+
+    def __init__(self, *, exec_results: list[CommandResult] | None = None) -> None:
+        self._exec_results = list(exec_results or [CommandResult(exit_code=0)])
+        self.executed_commands: list[str] = []
+
+    def connect(self) -> None:
+        pass
+
+    def exec_command(
+        self,
+        command: str,
+        timeout_seconds: float,
+        *,
+        on_output_line: Callable[[str], None] | None = None,
+    ) -> CommandResult:
+        self.executed_commands.append(command)
+        if self._exec_results:
+            return self._exec_results.pop(0)
+        return CommandResult(exit_code=0)
+
+    def close(self) -> None:
+        pass
 
 
 class TestWireWeeklyRetrainJobRegistration:
@@ -219,6 +256,56 @@ class TestWeeklyJobCallback:
 
         with pytest.raises(RuntimeError):
             weekly_callback()
+
+
+class TestWeeklyJobRealChainParamsFromActiveMeta:
+    """Critical-1 수정 재검증(AC-ATG-011): `main.py`의 실제 배선 →
+    `run_training()` → `execute_scheduled_training_run()` → 원격 디스패치
+    명령 문자열 체인 전체(단위 함수 단독 호출이 아니라 실제 호출 경로)를
+    통해 `--params-from-active-meta`가 주간 프로덕션 경로에 실제로
+    포함되는지 검증한다 — 기존 단위 테스트는 각 함수를 개별 호출·인자를
+    수동 주입해 검증했기 때문에 배선 누락(호출자가 인자를 전달하지 않는
+    결함)을 잡지 못했다."""
+
+    def test_weekly_production_path_includes_params_from_active_meta_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+        config = _make_config(tmp_path)
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        fake_connection = _FakeConnection(
+            exec_results=[CommandResult(exit_code=0), CommandResult(exit_code=0)]
+        )
+
+        # run_training()(manual_run.py)이 내부에서 직접 생성하는 실 WoL/SSH
+        # 구현체만 페이크로 치환한다 — run_training()/execute_scheduled_training_run()
+        # 자체는 monkeypatch하지 않고 실제 호출 경로를 그대로 태운다.
+        monkeypatch.setattr(manual_run_module, "UdpBroadcastWolSender", _FakeWolSender)
+        monkeypatch.setattr(
+            manual_run_module, "ParamikoSshConnection", lambda **_kwargs: fake_connection
+        )
+        # REQ-ATA-020의 실 30초 대기(sleep_fn 기본값 time.sleep)를 테스트에서
+        # 우회한다 — manual_run.run_training()은 sleep_fn을 노출하지 않으므로
+        # execute_scheduled_training_run()의 keyword-only 기본값을 직접 치환한다.
+        kwdefaults = runner_module.execute_scheduled_training_run.__kwdefaults__
+        assert kwdefaults is not None
+        monkeypatch.setitem(kwdefaults, "sleep_fn", lambda _seconds: None)
+        # 게이트 CLI 자체(별도 SSH 경로)는 이 테스트의 관심사가 아니므로
+        # 빈 verdict를 반환하는 페이크로 대체한다.
+        monkeypatch.setattr(main_module, "build_gate_promotion_fn", lambda **_: lambda promoted: {})
+
+        main_module.wire_weekly_retrain_job(registry, config=config, metrics=metrics)
+
+        _, kwargs = mock_scheduler.add_job.call_args
+        weekly_callback = kwargs.get("func") or mock_scheduler.add_job.call_args.args[0]
+        weekly_callback()
+
+        assert len(fake_connection.executed_commands) >= 1
+        dispatch_command = fake_connection.executed_commands[0]
+        assert "--params-from-active-meta" in dispatch_command
+        assert str(config.active_models_root) in dispatch_command
 
 
 class TestRunEntrypointFailFast:

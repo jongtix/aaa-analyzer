@@ -212,6 +212,60 @@ class TestRunTraining:
 
         assert captured["promotion_gate_fn"] is None
 
+    def test_forwards_params_from_active_meta_when_provided(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Critical-1 수정: `params_from_active_meta`가
+        `execute_scheduled_training_run()`에 그대로 전달되어야 한다."""
+        config = _make_config(tmp_path)
+        captured: dict = {}
+
+        def fake_execute(**kwargs):
+            captured.update(kwargs)
+            return RunOutcome(success=True, promoted=True)
+
+        monkeypatch.setattr(manual_run, "execute_scheduled_training_run", fake_execute)
+
+        manual_run.run_training(
+            run_kind="weekly",
+            run_id="run-5",
+            market="domestic",
+            horizon=5,
+            algorithm="lightgbm",
+            data_as_of=date(2026, 8, 11),
+            config=config,
+            metrics=TrainingMetrics(registry=CollectorRegistry()),
+            params_from_active_meta=config.active_models_root,
+        )
+
+        assert captured["params_from_active_meta"] == config.active_models_root
+
+    def test_params_from_active_meta_defaults_to_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """하위 호환: 미지정 시 기존 동작(None 경로)이 유지되어야 한다."""
+        config = _make_config(tmp_path)
+        captured: dict = {}
+
+        def fake_execute(**kwargs):
+            captured.update(kwargs)
+            return RunOutcome(success=True, promoted=True)
+
+        monkeypatch.setattr(manual_run, "execute_scheduled_training_run", fake_execute)
+
+        manual_run.run_training(
+            run_kind="weekly",
+            run_id="run-6",
+            market="domestic",
+            horizon=5,
+            algorithm="lightgbm",
+            data_as_of=date(2026, 8, 11),
+            config=config,
+            metrics=TrainingMetrics(registry=CollectorRegistry()),
+        )
+
+        assert captured["params_from_active_meta"] is None
+
     def test_returns_failure_outcome_unmodified(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

@@ -22,6 +22,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from typing import Literal
 
 from analyzer.common.logging import get_logger
@@ -92,6 +93,7 @@ def execute_scheduled_training_run(
     time_fn: Callable[[], float] = time.time,
     promotion_gate_fn: Callable[[bool], Mapping[tuple[str, int, str], PromotionVerdict]]
     | None = None,
+    params_from_active_meta: Path | None = None,
 ) -> RunOutcome:
     """REQ-ATA-010~062: WoL → 30초 대기(REQ-ATA-020) → SSH 연결(재시도 포함) →
     원격 디스패치(터널 수립 내장) → 완료 감지(종료코드) → 프로모션/실패처리까지
@@ -116,6 +118,12 @@ def execute_scheduled_training_run(
     §B 리스크 6 — 활성 챔피언이 아직 없어 챌린저 개념이 성립하지 않는 상태)
     기존처럼 이 함수에 전달된 단일 (market,horizon,algorithm)에 대해서만
     `record_success(outcome="success")`를 호출한다(하위 호환).
+
+    `params_from_active_meta`(REQ-ATG-011 배선 결손 수정): 지정되면
+    `build_remote_dispatch_command()`에 그대로 전달되어 원격 학습 CLI에
+    `--params-from-active-meta <경로>`가 추가된다 — 주간 원격 학습이 게이트
+    챌린저와 동일한 동결 하이퍼파라미터로 학습하게 하는 유일한 배선 지점이다
+    (미지정 시 기존 동작 그대로 유지, 하위 호환).
     """
     trace_id_token = set_trace_id(run_id)
     try:
@@ -183,6 +191,7 @@ def execute_scheduled_training_run(
             mysql_trainer_password=config.mysql_trainer_password,
             trainer_log_base_dir=config.trainer_log_base_dir,
             run_id=run_id,
+            params_from_active_meta=params_from_active_meta,
         )
 
         try:

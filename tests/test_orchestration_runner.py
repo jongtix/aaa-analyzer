@@ -220,6 +220,63 @@ class TestExecuteScheduledTrainingRunSuccess:
         assert str(config.staging_models_root / "run-1") in dispatch_command
         assert str(config.active_models_root) not in dispatch_command
 
+    def test_params_from_active_meta_forwarded_to_dispatch_command(self, tmp_path: Path):
+        """Critical-1 수정: `params_from_active_meta`가 지정되면
+        `--params-from-active-meta <경로>`가 원격 디스패치 명령에 포함되어야
+        한다 — 주간 원격 학습이 게이트 챌린저와 동일한 동결 하이퍼파라미터로
+        학습하게 하는 유일한 배선 지점(AC-ATG-011)."""
+        config = _make_config(tmp_path)
+        wol = _FakeWolSender([True])
+        connection = _FakeConnection(
+            exec_results=[CommandResult(exit_code=0), CommandResult(exit_code=0)]
+        )
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        execute_scheduled_training_run(
+            run_kind="weekly",
+            run_id="run-1",
+            market="domestic",
+            horizon=5,
+            algorithm="lightgbm",
+            data_as_of=date(2026, 8, 11),
+            config=config,
+            wol_sender=wol,
+            connection_factory=lambda: connection,
+            metrics=metrics,
+            sleep_fn=lambda _s: None,
+            params_from_active_meta=config.active_models_root,
+        )
+
+        dispatch_command = connection.executed_commands[0]
+        assert "--params-from-active-meta" in dispatch_command
+        assert str(config.active_models_root) in dispatch_command
+
+    def test_params_from_active_meta_omitted_when_not_provided(self, tmp_path: Path):
+        """하위 호환: 미지정 시(기본값 None) 기존 동작이 유지되어야 한다."""
+        config = _make_config(tmp_path)
+        wol = _FakeWolSender([True])
+        connection = _FakeConnection(
+            exec_results=[CommandResult(exit_code=0), CommandResult(exit_code=0)]
+        )
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        execute_scheduled_training_run(
+            run_kind="weekly",
+            run_id="run-1",
+            market="domestic",
+            horizon=5,
+            algorithm="lightgbm",
+            data_as_of=date(2026, 8, 11),
+            config=config,
+            wol_sender=wol,
+            connection_factory=lambda: connection,
+            metrics=metrics,
+            sleep_fn=lambda _s: None,
+        )
+
+        dispatch_command = connection.executed_commands[0]
+        assert "--params-from-active-meta" not in dispatch_command
+
 
 class TestExecuteScheduledTrainingRunWolFailure:
     """AC-ATA-002: WoL 3회 재시도 후 최종 실패 → 통합 실패 처리, 활성 모델 불변."""

@@ -83,6 +83,11 @@ def wire_weekly_retrain_job(
             config=config,
             metrics=metrics,
             promotion_gate_fn=promotion_gate_fn,
+            # REQ-ATG-011: 활성 챔피언 사이드카(M1 리더 재사용)에서 조합별
+            # 동결 하이퍼파라미터를 읽어 주간 원격 학습에 주입한다 — 게이트
+            # 챌린저와 동일 파라미터로 학습하게 하는 유일한 프로덕션 배선
+            # 지점(AC-ATG-011).
+            params_from_active_meta=config.active_models_root,
         )
         if not outcome.success:
             # §B 리스크 3: 콜백 레벨에서는 metrics.record_failure()를 다시

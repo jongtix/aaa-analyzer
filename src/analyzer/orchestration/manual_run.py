@@ -14,6 +14,7 @@ import argparse
 import sys
 from collections.abc import Callable, Mapping
 from datetime import date
+from pathlib import Path
 
 from analyzer.common.logging import get_logger
 from analyzer.common.trace import new_trace_id
@@ -39,6 +40,7 @@ def run_training(
     metrics: TrainingMetrics,
     promotion_gate_fn: Callable[[bool], Mapping[tuple[str, int, str], PromotionVerdict]]
     | None = None,
+    params_from_active_meta: Path | None = None,
 ) -> RunOutcome:
     """설정 로딩 이후의 배선(WoL sender·SSH 연결 팩토리)을 담당한다.
 
@@ -56,6 +58,9 @@ def run_training(
     `execute_scheduled_training_run()`에 그대로 전달된다(1차 배포 이후 상시
     게이트 경로). 미지정 시 기존 동작(1차 배포 이전, None 경로)이 그대로
     유지된다.
+
+    `params_from_active_meta`(REQ-ATG-011 배선 결손 수정, 하위 호환 기본값
+    `None`): 지정되면 `execute_scheduled_training_run()`에 그대로 전달된다.
     """
     wol_sender = UdpBroadcastWolSender()
 
@@ -80,6 +85,7 @@ def run_training(
         connection_factory=connection_factory,
         metrics=metrics,
         promotion_gate_fn=promotion_gate_fn,
+        params_from_active_meta=params_from_active_meta,
     )
 
 
