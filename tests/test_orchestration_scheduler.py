@@ -11,7 +11,10 @@ from unittest.mock import MagicMock
 from apscheduler.triggers.cron import CronTrigger
 
 from analyzer.orchestration.scheduler import (
+    COALESCE_DEFAULT,
     DAILY_STALENESS_CHECK_JOB_ID,
+    MAX_INSTANCES_DEFAULT,
+    MISFIRE_GRACE_TIME_SECONDS_DEFAULT,
     MONTHLY_OPTUNA_TUNING_JOB_ID,
     WEEKLY_FULL_RETRAIN_JOB_ID,
     SchedulerRegistry,
@@ -54,7 +57,13 @@ class TestRegisterCronJob:
         registry.register_cron_job("job-1", trigger, _job)
 
         mock_scheduler.add_job.assert_called_once_with(
-            _job, trigger=trigger, id="job-1", replace_existing=True
+            _job,
+            trigger=trigger,
+            id="job-1",
+            replace_existing=True,
+            max_instances=MAX_INSTANCES_DEFAULT,
+            coalesce=COALESCE_DEFAULT,
+            misfire_grace_time=MISFIRE_GRACE_TIME_SECONDS_DEFAULT,
         )
 
     def test_appends_job_id_to_registry(self):
@@ -71,6 +80,40 @@ class TestRegisterCronJob:
         registry.register_cron_job("job-1", CronTrigger(hour=2), lambda: None)
 
         assert registry.registered_jobs() == ["job-1"]
+
+
+class TestRegisterCronJobSafetyArgs:
+    """REQ-ATG-003(H-1): max_instances=1/coalesce/misfire_grace_time이
+    명시 전달되어야 한다(AC-ATG-003)."""
+
+    def test_add_job_receives_max_instances_coalesce_misfire_grace_time(self):
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+
+        registry.register_cron_job("job-1", CronTrigger(hour=1), lambda: None)
+
+        _, kwargs = mock_scheduler.add_job.call_args
+        assert kwargs["max_instances"] == 1
+        assert kwargs["coalesce"] is True
+        assert kwargs["misfire_grace_time"] == MISFIRE_GRACE_TIME_SECONDS_DEFAULT
+
+    def test_caller_can_override_safety_args(self):
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+
+        registry.register_cron_job(
+            "job-1",
+            CronTrigger(hour=1),
+            lambda: None,
+            max_instances=2,
+            coalesce=False,
+            misfire_grace_time=60,
+        )
+
+        _, kwargs = mock_scheduler.add_job.call_args
+        assert kwargs["max_instances"] == 2
+        assert kwargs["coalesce"] is False
+        assert kwargs["misfire_grace_time"] == 60
 
 
 class TestCronTriggerFactories:

@@ -31,6 +31,17 @@ WEEKLY_FULL_RETRAIN_JOB_ID = "weekly-full-retrain"
 MONTHLY_OPTUNA_TUNING_JOB_ID = "monthly-optuna-tuning"
 DAILY_STALENESS_CHECK_JOB_ID = "daily-staleness-check"
 
+MAX_INSTANCES_DEFAULT = 1
+"""REQ-ATG-003(H-1): 중복 발화 방지 — 동시에 실행 중인 잡 인스턴스를 1개로
+제한한다(명시 전달, 기본값 의존 금지)."""
+
+COALESCE_DEFAULT = True
+"""REQ-ATG-003(H-1): 놓친 발화가 여러 번 누적돼도 재기동 시 1회만 실행한다."""
+
+MISFIRE_GRACE_TIME_SECONDS_DEFAULT = 300
+"""REQ-ATG-003(H-1): misfire_grace_time — 놓친 발화 스킵 의미론(APScheduler
+기본 의미론 유지). 이름 있는 상수(REVISABLE, 초기값 5분)."""
+
 
 class SchedulerRegistry:
     """APScheduler cron 잡 레지스트리 — 실제 잡 등록/조회를 담당한다.
@@ -50,13 +61,32 @@ class SchedulerRegistry:
         """현재 등록된 잡 식별자 목록을 반환한다."""
         return list(self._job_ids)
 
-    def register_cron_job(self, job_id: str, trigger: CronTrigger, func: Callable[[], None]) -> str:
-        """REQ-ATA-080/082: cron 트리거 전용으로 잡을 등록한다.
+    def register_cron_job(
+        self,
+        job_id: str,
+        trigger: CronTrigger,
+        func: Callable[[], None],
+        *,
+        max_instances: int = MAX_INSTANCES_DEFAULT,
+        coalesce: bool = COALESCE_DEFAULT,
+        misfire_grace_time: int = MISFIRE_GRACE_TIME_SECONDS_DEFAULT,
+    ) -> str:
+        """REQ-ATA-080/082 + REQ-ATG-003(H-1): cron 트리거 전용으로 잡을
+        등록한다 — `max_instances`/`coalesce`/`misfire_grace_time`을
+        기저 스케줄러 `add_job()`에 **명시적으로** 전달한다(기본값 의존 금지).
 
         동일 `job_id`로 재등록하면 기존 잡을 대체한다(`replace_existing=True`) —
         `_job_ids`에는 중복 추가하지 않는다.
         """
-        self._scheduler.add_job(func, trigger=trigger, id=job_id, replace_existing=True)
+        self._scheduler.add_job(
+            func,
+            trigger=trigger,
+            id=job_id,
+            replace_existing=True,
+            max_instances=max_instances,
+            coalesce=coalesce,
+            misfire_grace_time=misfire_grace_time,
+        )
         if job_id not in self._job_ids:
             self._job_ids.append(job_id)
         return job_id
