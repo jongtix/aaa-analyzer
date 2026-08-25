@@ -1,53 +1,43 @@
 name: Docker
 
-# Release 워크플로 완료 시 트리거
-# GITHUB_TOKEN으로 생성한 태그는 다른 워크플로를 트리거하지 않으므로 (GitHub 제약)
-# tags: v* 대신 workflow_run 이벤트를 사용한다
+# 태그 push 트리거 (SPEC-INFRA-CICD-002 M5/F1/REQ-017/018).
+# App 토큰(SPEC-INFRA-CICD-002 M3)이 push한 태그는 workflow_run과 달리
+# push:tags 이벤트를 실제로 발화한다 — GITHUB_TOKEN push는 발화하지 않는다.
 on:
-  workflow_run:
-    workflows: ["Release"]
-    types: [completed]
+  push:
+    tags:
+      - 'v*'
 
 permissions: {}  # 워크플로 전체 기본 권한 차단, job별 최소 권한 선언
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    # Release 워크플로가 성공한 경우에만 실행
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     permissions:
       contents: read
       packages: write
     steps:
-      # 1차 checkout: 태그 조회용 (workflow_run의 HEAD는 릴리즈 커밋 이전 시점)
+      # 태그 push 이벤트이므로 checkout 시점의 커밋이 이미 릴리스 커밋이다.
+      # workflow_run 시절의 1차(태그 탐색)/2차(재체크아웃) checkout이 불필요해졌다.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      # 최신 태그 조회 + semver 검증
-      # python-semantic-release가 릴리즈를 생성하지 않은 경우 (chore 커밋만 등) 빌드 스킵
-      - name: Get latest tag
+      # github.ref_name이 곧 push된 태그 이름이므로 git 명령 없이 바로 도출한다.
+      - name: Derive version from tag
         id: tag
         run: |
-          git fetch --tags
-          TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          TAG="${GITHUB_REF_NAME}"
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "No valid semver release tag found (tag='$TAG'). Skipping build."
+            echo "Unexpected tag format (tag='$TAG'). Skipping build."
             echo "valid=false" >> "$GITHUB_OUTPUT"
           else
             echo "tag=$TAG" >> "$GITHUB_OUTPUT"
             echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
             echo "valid=true" >> "$GITHUB_OUTPUT"
           fi
-
-      # 2차 checkout: 태그가 가리키는 릴리즈 커밋으로 전환
-      # pyproject.toml 버전이 업데이트된 소스로 Docker 이미지를 빌드한다
-      - name: Checkout release commit
-        if: ${{ steps.tag.outputs.valid == 'true' }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ steps.tag.outputs.tag }}
 
       # 게이트 정책 분리: 빌드 소스는 릴리스 태그 트리(재현성), 예외 정책(.trivyignore)은
       # 항상 main HEAD를 본다 — 예외 등록·만료 갱신이 릴리스 없이 즉시 게이트에 반영된다
