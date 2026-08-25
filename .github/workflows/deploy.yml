@@ -28,6 +28,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
 
       # analyzer는 DDL이 없음(ADR-016, B4 확정) — collector의 Flyway 마이그레이션
       # 체크·조건부 롤백 분기가 불필요하다. 실패 시 무조건 이전 digest로 롤백한다.
