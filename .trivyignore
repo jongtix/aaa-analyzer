@@ -3,3 +3,12 @@
 #       python:3.14-slim base(2026-08-05 빌드)가 아직 이를 반영하지 않은 상태. 레포 내 교정 수단 없음(REQ-CVE-016).
 # 승인: 2026-08-19 (사용자) | 만료: 2026-09-18 (승인일+30일, REQ-CVE-022 기본값)
 CVE-2026-53615 exp:2026-09-18
+
+# CVE-2026-53612, CVE-2026-53613, CVE-2026-53614 | util-linux 계열 9패키지(bsdutils/libblkid1/liblastlog2-2/libmount1/libsmartcols1/libuuid1/login/mount/util-linux) HIGH
+# 사유: 상류-지연(upstream-lag) — CVE-2026-53615와 동일 패키지군, Debian trixie에 수정판
+#       2.41.5-0+deb13u1 게시됨, python:3.14-slim base가 아직 이를 반영하지 않은 상태.
+#       레포 내 교정 수단 없음(REQ-CVE-016).
+# 승인: 2026-08-25 (사용자) | 만료: 2026-09-24 (승인일+30일, REQ-CVE-022 기본값)
+CVE-2026-53612 exp:2026-09-24
+CVE-2026-53613 exp:2026-09-24
+CVE-2026-53614 exp:2026-09-24
