@@ -70,7 +70,7 @@ jobs:
 
       - name: Setup Buildx
         if: ${{ steps.tag.outputs.valid == 'true' }}
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       # 로컬 적재만 수행 (push 아님) — Trivy 스캔 통과 후에만 별도 push 스텝에서 GHCR에 반영한다
       - name: Build (local load for scan)
