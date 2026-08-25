@@ -31,8 +31,13 @@ jobs:
 
       - name: Save current image digest
         id: prev
+        # 컨테이너명 수정(2026-08-25): compose container_name은 aaa-analyzer이지
+        # analyzer가 아니다 — 이전 형태는 항상 조회 실패해 prev_digest가 빈 문자열이
+        # 됐고, 그 결과 실패 시 아래 "Rollback on failure" 조건(prev_digest != '')이
+        # 항상 거짓이 되어 자동 롤백이 한 번도 발동하지 않았다(v0.13.0 배포 실패
+        # 실전에서 확인 — crash-loop 상태에서 수동 SSH 롤백으로 복구).
         run: |
-          PREV_DIGEST=$(docker inspect analyzer --format='{{index .RepoDigests 0}}' 2>/dev/null || echo "")
+          PREV_DIGEST=$(docker inspect aaa-analyzer --format='{{index .RepoDigests 0}}' 2>/dev/null || echo "")
           echo "prev_digest=$PREV_DIGEST" >> $GITHUB_OUTPUT
 
       - name: Pull latest image
