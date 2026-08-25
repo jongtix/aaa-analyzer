@@ -1,6 +1,51 @@
 # CHANGELOG
 
 
+## v0.13.1 (2026-08-25)
+
+### 🐛
+
+- 🐛 fix(ci): 배포 롤백의 컨테이너명 불일치로 자동 롤백 무력화 수정
+  ([`eae6d6f`](https://github.com/jongtix/aaa-analyzer/commit/eae6d6f))
+- 🐛 fix(docker): 런타임 이미지에 libgomp1 설치 — lightgbm import 크래시 해결
+  ([`d937cb1`](https://github.com/jongtix/aaa-analyzer/commit/d937cb1))
+
+v0.13.0 배포(NAS)가 `container aaa-analyzer is unhealthy`로 실패하며 크래시루프 상태로 노출됐다. 두 결함을
+같은 배포 시도에서 함께 발견했다: (1) lightgbm의 Linux wheel이 `libgomp.so.1`(GNU OpenMP)에 동적 링크돼
+있으나 wheel 안에 번들하지 않는 알려진 upstream 제약([microsoft/LightGBM#4484](https://github.com/microsoft/LightGBM/issues/4484)) —
+이 SPEC의 M5에서 처음으로 `main.py` 기동 경로가 `gate_adapter→promotion_gate→lightgbm`을 즉시 import하게
+되며 실전에 노출됐다(xgboost는 자체 libgomp를 정적 번들해 지금까지 문제가 드러나지 않았음). (2)
+`deploy.yml`의 "Save current image digest" 단계가 컨테이너명을 오탈자(`analyzer`, 실제는 `aaa-analyzer`)로
+조회해 `prev_digest`가 항상 빈 문자열이 되어 자동 롤백 조건이 상시 거짓이었다 — 이번이 실전에서 처음 걸린
+경로였다. 긴급 수동 SSH 롤백(v0.12.2)으로 서비스를 복구한 뒤 두 결함을 근본 수정하고 재배포해 정상화를
+확인했다(`docker inspect` healthy, `"orchestration wired (jobs=1)"` 로그, `/metrics` 노출, VM 스크랩 `up`).
+
+SPEC: SPEC-ANALYZER-TRAIN-GATE-001
+
+
+## v0.13.0 (2026-08-25)
+
+### ✨
+
+- ✨ feat(SPEC-ANALYZER-TRAIN-GATE-001): 주간 챌린저 게이트 배선 + cron 활성화 — 맥 원격 게이트 실행 + 관측 경로 개통
+  ([`138fd95`](https://github.com/jongtix/aaa-analyzer/commit/138fd95)..
+  [`58f1ae6`](https://github.com/jongtix/aaa-analyzer/commit/58f1ae6))
+
+TRAIN-EVAL-001이 도입한 오프라인 챔피언/챌린저 게이트를 실제 주간 자동 실행 경로에 배선한다 — M1
+`gate.py` 순수함수부(챔피언 경로 해석 + 동결 파라미터 리더 + verdict 직렬화), M2 게이트 CLI 본체
+(`run_gate` + `main`), M3 주간 학습 CLI 동결 파라미터 주입, M4 NAS 측 게이트 어댑터 + `E-1` + `manual_run`
+확장, M5 `main.py` 기동 배선 + 스케줄러 안전장치를 순서대로 구현한다.
+
+배선 완료 후 발견된 5건(2 Critical + 3 High)의 리뷰 지적 — `params_from_active_meta` 프로덕션 배선 누락,
+게이트 실패가 구조화 로그 경로를 우회하는 결함, `run_gate()` 조합별 예외 격리 부재, `TrainingMetrics`
+싱글턴 반복 발화, `record_success` 미발행 검증 부재 — 를 같은 릴리즈에서 수정한다.
+
+신규 MySQL 스키마·env var·마이그레이션 없음. 신규 파일: `orchestration/gate.py`,
+`orchestration/gate_cli.py`, `orchestration/gate_adapter.py`.
+
+SPEC: SPEC-ANALYZER-TRAIN-GATE-001
+
+
 ## v0.12.0 (2026-08-18)
 
 ### ✨
