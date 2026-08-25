@@ -9,7 +9,7 @@ resolution-markers = [
 
 [[package]]
 name = "aaa-analyzer"
-version = "0.13.1"
+version = "0.0.0+placeholder"
 source = { editable = "." }
 dependencies = [
     { name = "apscheduler" },
