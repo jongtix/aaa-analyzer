@@ -64,9 +64,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      # python-semantic-release: pyproject.toml [project.version]을 네이티브로 갱신
-      # (node @semantic-release/exec + sed 우회 불요). commit_parser="emoji" 내장 파서
-      # 사용, collector .releaserc.js와 동일한 gitmoji+conventional 매핑을
+      # python-semantic-release: 태그만을 버전의 진실로 삼는다(SPEC-INFRA-CICD-002
+      # F2/REQ-019 — commit-back 제거). commit_parser="emoji" 내장 파서 사용,
+      # collector .releaserc.js와 동일한 gitmoji+conventional 매핑을
       # [tool.semantic_release.commit_parser_options]로 재현(✨→minor, 🐛/⚡→patch).
       - name: Python Semantic Release
         uses: python-semantic-release/python-semantic-release@39dd2052f2ce8282a5d932c31d58a2ca06d2550e # v10.6.1
@@ -76,3 +76,8 @@ jobs:
           git_committer_email: "github-actions[bot]@users.noreply.github.com"
           # collector는 CHANGELOG.md를 생성하지 않음(.releaserc.js에 changelog 플러그인 미포함) — 동일하게 비활성화.
           changelog: false
+          # commit-back 제거(REQ-019): pyproject.toml에 버전을 다시 커밋하지 않고
+          # 태그만 생성·push한다. --no-commit --tag --push의 액션 입력 등가물.
+          commit: false
+          tag: true
+          push: true
