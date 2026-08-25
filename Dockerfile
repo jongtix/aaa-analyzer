@@ -34,6 +34,17 @@ RUN rm -rf /usr/local/lib/python3.14/ensurepip \
     /usr/local/lib/python3.14/site-packages/pip* \
     /usr/local/bin/pip*
 
+# lightgbm 런타임 의존성(SPEC-ANALYZER-TRAIN-GATE-001 M7 라이브 검증에서 발견):
+# lightgbm의 Linux wheel은 libgomp.so.1(GNU OpenMP)에 동적 링크되어 있으나 wheel 안에
+# 번들하지 않는다(manylinux/PEP 599 비준수, upstream 알려진 제약 —
+# https://github.com/microsoft/LightGBM/issues/4484). xgboost는 반대로 자체 libgomp
+# 사본을 정적 번들하므로 지금까지는 문제가 드러나지 않았다. M5에서 처음으로 main.py
+# 기동 경로가 gate_adapter→promotion_gate→lightgbm을 즉시 import하게 되며 크래시가
+# 실전에 노출됐다(2026-08-25 라이브 배포 실패, 수동 롤백으로 v0.12.2 복구 후 확정).
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 # 비루트 유저 생성(UID 1005 — collector UID 1004와 비충돌, Debian 계열 groupadd/useradd)
 RUN groupadd -g 1005 analyzer \
     && useradd -u 1005 -g analyzer --no-create-home --shell /usr/sbin/nologin analyzer
