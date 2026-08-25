@@ -37,6 +37,7 @@ jobs:
             echo "valid=false" >> "$GITHUB_OUTPUT"
           else
             echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
             echo "valid=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -89,6 +90,8 @@ jobs:
           context: .
           load: true
           platforms: linux/amd64
+          build-args: |
+            VERSION=${{ steps.tag.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -117,6 +120,8 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64
+          build-args: |
+            VERSION=${{ steps.tag.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

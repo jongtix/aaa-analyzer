@@ -4,6 +4,11 @@
 FROM python:3.14-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4 AS build
 WORKDIR /analyzer
 
+# 릴리스 태그 버전 주입(REQ-020/AC-023): PSR이 commit: false로 동작해 pyproject.toml의
+# version은 정적으로 남으므로, 빌드타임에 태그 버전을 pyproject.toml에 반영한다.
+# 미지정 시 0.0.0(로컬 빌드 기본값).
+ARG VERSION=0.0.0
+
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 # 의존성 레이어 캐시용 — src 변경 시 재다운로드 방지
@@ -13,6 +18,11 @@ RUN uv sync --locked --no-dev --no-install-project
 # 소스 복사 및 프로젝트 자체 설치(런타임 코드 포함, dev 그룹 제외)
 COPY src/ src/
 COPY README.md ./
+# 프로젝트 자체 설치 직전에 버전을 덮어써야 .venv에 설치되는 dist-info 버전이 태그와 일치한다.
+# pyproject.toml만 sed로 고치면 안 된다 — uv.lock이 루트 패키지 버전을 함께 기록하므로
+# 아래 `uv sync --locked`가 lockfile 불일치로 exit 1이 된다(실측 재현). `uv version --no-sync`는
+# pyproject.toml과 uv.lock의 루트 버전을 함께 갱신하고 의존성 해석 결과는 건드리지 않는다.
+RUN uv version --no-sync "${VERSION}"
 RUN uv sync --locked --no-dev
 
 # === Runtime stage ===
