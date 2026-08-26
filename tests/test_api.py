@@ -75,6 +75,7 @@ class TestMainEntrypoint:
             staleness_threshold_days=28,
             staging_models_root=tmp_path / "staging",
             active_models_root=tmp_path / "models",
+            container_models_root=tmp_path / "container-models",
             cache_dir=tmp_path / "cache",
             calendar_code="KRX",
             feature_code_version="v1",

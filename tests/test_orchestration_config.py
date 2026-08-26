@@ -20,6 +20,7 @@ _REQUIRED_ENV = {
     "TRAIN_AUTOMATION_KNOWN_HOSTS_PATH": "/run/secrets/known_hosts",
     "TRAIN_AUTOMATION_STAGING_MODELS_ROOT": "/staging/models",
     "TRAIN_AUTOMATION_ACTIVE_MODELS_ROOT": "/models",
+    "TRAIN_AUTOMATION_CONTAINER_MODELS_ROOT": "/mnt/container-models",
     "TRAIN_AUTOMATION_DB_TUNNEL_HOST": "nas-host",
     "TRAIN_AUTOMATION_DB_TUNNEL_KEY_PATH": "/run/secrets/db_tunnel_key",
     "TRAIN_AUTOMATION_CACHE_DIR": "/cache",
@@ -60,6 +61,7 @@ class TestGetAutomationConfig:
             staleness_threshold_days=28,
             staging_models_root=Path("/staging/models"),
             active_models_root=Path("/models"),
+            container_models_root=Path("/mnt/container-models"),
             cache_dir=Path("/cache"),
             calendar_code="KRX",
             feature_code_version="v1",
@@ -192,6 +194,28 @@ class TestGetAutomationConfig:
         assert config.python_executable_path == Path(
             "/Users/other/Development/aaa/aaa-analyzer/.venv/bin/python"
         )
+
+    def test_raises_when_container_models_root_missing(self, monkeypatch: pytest.MonkeyPatch):
+        """AC-ATD-003 (SPEC-ANALYZER-TRAIN-STALENESS-001): 나머지 15종이 모두
+        설정된 상태에서 신규 필수 변수 TRAIN_AUTOMATION_CONTAINER_MODELS_ROOT만
+        누락되면 MissingConfigError 메시지에 그 변수명이 포함되어야 한다 —
+        기존 일괄 검증 경로(get_automation_config())에 자동으로 편입된다."""
+        _set_required_env(monkeypatch)
+        monkeypatch.delenv("TRAIN_AUTOMATION_CONTAINER_MODELS_ROOT", raising=False)
+
+        with pytest.raises(MissingConfigError, match="TRAIN_AUTOMATION_CONTAINER_MODELS_ROOT"):
+            get_automation_config()
+
+    def test_container_models_root_reads_configured_value(self, monkeypatch: pytest.MonkeyPatch):
+        """AC-ATD-003: 컨테이너 내부 마운트 경로 전용 신규 변수는 기존
+        TRAIN_AUTOMATION_ACTIVE_MODELS_ROOT(맥북 SMB 경로)와 별개로, 설정된
+        값을 그대로 AutomationConfig.container_models_root에 채운다."""
+        _set_required_env(monkeypatch)
+        monkeypatch.setenv("TRAIN_AUTOMATION_CONTAINER_MODELS_ROOT", "/mnt/other-container-models")
+
+        config = get_automation_config()
+
+        assert config.container_models_root == Path("/mnt/other-container-models")
 
     def test_mysql_database_and_trainer_password_reuse_container_env(
         self, monkeypatch: pytest.MonkeyPatch

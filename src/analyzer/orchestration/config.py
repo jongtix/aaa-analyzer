@@ -34,6 +34,7 @@ _REQUIRED_ENV_VARS = (
     "TRAIN_AUTOMATION_KNOWN_HOSTS_PATH",
     "TRAIN_AUTOMATION_STAGING_MODELS_ROOT",
     "TRAIN_AUTOMATION_ACTIVE_MODELS_ROOT",
+    "TRAIN_AUTOMATION_CONTAINER_MODELS_ROOT",
     "TRAIN_AUTOMATION_DB_TUNNEL_HOST",
     "TRAIN_AUTOMATION_DB_TUNNEL_KEY_PATH",
     "TRAIN_AUTOMATION_CACHE_DIR",
@@ -82,6 +83,12 @@ class AutomationConfig:
     """plan.md §B.5(D6): 사전 차단 설계의 임시 스테이징 경로."""
     active_models_root: Path
     """TRAIN-001의 활성 모델 경로 관례를 그대로 소비 — 이 SPEC이 재정의하지 않는다."""
+    container_models_root: Path
+    """SPEC-ANALYZER-TRAIN-STALENESS-001 REQ-ATD-003: `detect_stale_models()`가
+    스캔하는 컨테이너 내부 경로 — NAS analyzer 컨테이너에 read-only bind
+    mount된 활성 모델 디렉토리를 가리킨다. `active_models_root`(맥북 SMB 경로
+    전용, `promote_staging_to_active()`가 소비)와 별개 값이며 서로 대체할 수
+    없다 — 재사용 시 원격 프로모션 경로가 깨진다."""
     cache_dir: Path
     calendar_code: str
     feature_code_version: str
@@ -172,6 +179,7 @@ def get_automation_config() -> AutomationConfig:
         ),
         staging_models_root=Path(os.environ["TRAIN_AUTOMATION_STAGING_MODELS_ROOT"]),
         active_models_root=Path(os.environ["TRAIN_AUTOMATION_ACTIVE_MODELS_ROOT"]),
+        container_models_root=Path(os.environ["TRAIN_AUTOMATION_CONTAINER_MODELS_ROOT"]),
         cache_dir=Path(os.environ["TRAIN_AUTOMATION_CACHE_DIR"]),
         calendar_code=os.environ.get("TRAIN_AUTOMATION_CALENDAR_CODE", _DEFAULT_CALENDAR_CODE),
         feature_code_version=os.environ.get(
