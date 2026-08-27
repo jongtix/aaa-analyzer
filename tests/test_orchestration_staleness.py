@@ -117,6 +117,63 @@ class TestDetectStaleModels:
         assert len(results) == 1
         assert results[0].is_stale is False
 
+    def test_returns_empty_list_when_models_root_does_not_exist(self, tmp_path: Path):
+        """models_root 부재 시나리오(§B 리스크 3) — Python 3.14 pathlib.Path.rglob()는
+        존재하지 않는 디렉터리에서 예외를 던지지 않고 빈 이터레이터를 반환한다(실측
+        확인됨). detect_stale_models()는 이 동작을 그대로 전파하며 별도 방어 코드를
+        추가하지 않는다 — 도메인 함수는 예외를 삼키지 않는 순수 함수로 유지한다(plan.md
+        §B 리스크 3, §D 제약)."""
+        missing_root = tmp_path / "does-not-exist"
+        assert not missing_root.exists()
+
+        results = detect_stale_models(missing_root, threshold_days=28, as_of=date(2026, 2, 15))
+
+        assert results == []
+
+    def test_propagates_permission_error_from_rglob(self, tmp_path: Path, monkeypatch):
+        """권한 거부 시나리오(§B 리스크 3) — 샌드박스 환경에서는 `chmod 000`이 실제
+        권한 거부를 재현하지 못해(실측: root/샌드박스 우회 확인) `Path.rglob()`을
+        직접 모킹해 PermissionError를 재현한다. `detect_stale_models()`는 예외를
+        삼키지 않고 그대로 전파하는 순수 함수로 유지한다(plan.md §B 리스크 3 —
+        예외 처리·기록 책임은 콜백(api/main.py)에 둔다, 이 마일스톤 범위 밖)."""
+
+        def _raise_permission_error(self, pattern):  # noqa: ARG001 - Path.rglob 시그니처 모방
+            raise PermissionError("permission denied")
+
+        monkeypatch.setattr(Path, "rglob", _raise_permission_error)
+
+        try:
+            detect_stale_models(tmp_path, threshold_days=28, as_of=date(2026, 2, 15))
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError("detect_stale_models()가 PermissionError를 삼켰다 — 전파돼야 한다")
+
+    def test_excludes_multi_dot_sidecar_meta_json_files(self, tmp_path: Path):
+        """REQ-ATD-008: `.meta.json`처럼 확장자 앞에 점이 하나 더 있는 사이드카
+        파일은 배제한다 — `\\w+`는 `.`를 포함하지 않으므로 `trained_date` 뒤
+        `\\.` 앵커 이후 남은 문자열이 `meta.json`(내부에 `.` 포함)이면 전체 패턴이
+        `$`까지 매칭되지 않아 이미 배제된다(실측 확인). allowlist(`txt|json`)
+        강화 후에도 동일하게 배제됨을 회귀 고정한다."""
+        target_dir = tmp_path / "domestic" / "5" / "lightgbm"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        (target_dir / "domestic_5_lightgbm_2026-01-01.meta.json").write_text("{}")
+
+        results = detect_stale_models(tmp_path, threshold_days=28, as_of=date(2026, 2, 15))
+
+        assert results == []
+
+    def test_rejects_unexpected_single_extensions(self, tmp_path: Path):
+        """REQ-ATD-008: allowlist 강화 후 `txt`/`json` 외 확장자(예: `.bin`, `.pkl`,
+        `.pt`)는 이전에는 permissive `\\w+`가 매칭했으나 강화된 allowlist에서는
+        배제돼야 한다."""
+        for ext in ("bin", "pkl", "pt"):
+            _touch_model_file(tmp_path, "domestic", 5, "lightgbm", date(2026, 1, 1), ext=ext)
+
+        results = detect_stale_models(tmp_path, threshold_days=28, as_of=date(2026, 2, 15))
+
+        assert results == []
+
     def test_defaults_to_kst_calendar_date_not_system_local(self, tmp_path: Path, monkeypatch):
         """이 프로젝트는 모든 시각을 KST로 해석한다 — 시스템 로컬 타임존이 달라도
         `as_of` 미지정 시 KST 캘린더 날짜를 기준으로 판정해야 한다."""

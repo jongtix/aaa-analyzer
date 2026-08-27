@@ -143,6 +143,14 @@ class TestCronTriggerFactories:
         assert fields["month"] == "*"
         assert str(trigger.timezone) == "Asia/Seoul"
 
+    def test_daily_staleness_check_fires_at_04_00_kst(self):
+        """REQ-ATD-006: 발화 시각이 07:00 KST에서 04:00 KST로 변경됐다."""
+        trigger = daily_staleness_check_trigger()
+
+        fields = {f.name: str(f) for f in trigger.fields}
+        assert fields["hour"] == "4"
+        assert fields["minute"] == "0"
+
     def test_daily_staleness_check_is_independent_schedule_from_training_jobs(self):
         """REQ-ATA-083: 정체 감지 잡은 주간/월간 학습 잡과 독립적인 별도 스케줄이다
         (학습 잡 실패 여부와 무관하게 매일 실행)."""
