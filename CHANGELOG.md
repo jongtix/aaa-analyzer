@@ -5,6 +5,14 @@
 
 ### ✨
 
+- 일일 모델 정체 감지 cron 활성화 (SPEC-ANALYZER-TRAIN-STALENESS-001 M1/M3/M4, REQ-ATD-*)
+  - 신규 필수 환경변수 `TRAIN_AUTOMATION_CONTAINER_MODELS_ROOT` — 컨테이너 내부 활성 모델 마운트 경로. `AutomationConfig.container_models_root` 필드 + `_REQUIRED_ENV_VARS` 추가로 기존 기동 fail-fast 경로에 편입(REQ-ATD-003). NAS 호스트 측 `:ro` 마운트와 권한은 aaa-infra 몫
+  - `api/main.py`에 `daily-staleness-check` 잡 개별 등록 — `detect_stale_models()` 호출 → 성공 시 `TrainingMetrics.record_staleness_batch()`, 실패 시 `record_failure(stage="staleness_scan")` 후 재발생하는 콜백 클로저 배선. GATE-001이 확립한 프로세스 싱글턴 `TrainingMetrics`를 재사용하며 콜백 내부에서 재생성하지 않는다. 등록 잡은 주간+일일 정확히 2건(월간은 여전히 미등록) (REQ-ATD-005/007/010)
+  - `record_staleness_batch()` 신설 — 스캔마다 `aaa_analyzer_model_stale` 게이지 패밀리를 clear한 뒤 이번 결과만 재기록해, 삭제된 (market, horizon) 조합의 값이 영구 잔존하지 않게 한다. 기존 `record_staleness()` 시그니처는 무수정(REQ-ATD-009)
+  - `daily_staleness_check_trigger()` 발화 시각 07:00 → **04:00 KST** 변경 — 월간 예정 시각·주간 실행창과의 3중 충돌 회피. 잡 ID `daily-staleness-check`는 무수정(REQ-ATD-006)
+  - `_MODEL_FILENAME_PATTERN` 확장자 그룹을 `\.\w+`에서 `training/persistence.py`의 `_NATIVE_EXTENSION` 기반 동적 allowlist로 강화 — `.meta.json` 등 사이드카 파일을 명시적으로 배제한다. 확장자 집합의 단일 소스를 유지해 신규 알고리즘 도입 시 이중 갱신이 필요 없다(REQ-ATD-008)
+  - 정체 판정 로직(`detect_stale_models()` 본체)과 임계값(기본 28일)은 무수정 — 이 SPEC은 배선 SPEC이다
+  - 프로덕션 활성화는 별도 운영자 작업 대기 중: NAS `.env.analyzer`에 신규 환경변수 기입 → `docker-compose.yml` 적용 → `init-nas.sh` 재실행 **후에만** 신규 이미지 배포(순서 위반 시 `MissingConfigError` 크래시루프)
 - CI/CD 룰셋 강화 (SPEC-INFRA-CICD-002)
   - `main` 브랜치 룰셋(`main-protection`) 신설 — 선형 히스토리 강제, 강제 푸시/삭제 차단, `status-check` 상태 체크 필수
   - `release.yml`의 test job에 `pull_request` 트리거 추가 — PR에서 머지 전 실제 CI 검증
