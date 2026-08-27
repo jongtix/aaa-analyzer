@@ -7,6 +7,12 @@ SPEC-ANALYZER-TRAIN-GATE-001 M5(REQ-ATG-001/002/003/004/005/006): 기동 시
 등록하지 않는다(`register_default_jobs()`는 호출하지 않는다). 필수
 환경변수 누락 시 `get_automation_config()`의 `MissingConfigError`가 잡히지
 않고 전파되어 기동이 실패해야 한다(G-1 fail-fast).
+
+SPEC-ANALYZER-TRAIN-STALENESS-001 M3(REQ-ATD-005/007/010): 위 주간 배선
+패턴을 참조해 일일 모델 정체 감지 cron 잡을 개별 `register_cron_job()`
+호출로 추가 등록한다(`register_default_jobs()`는 여전히 호출하지 않는다).
+등록 후 `registered_jobs()`는 정확히 `["weekly-full-retrain",
+"daily-staleness-check"]` 2건이어야 한다.
 """
 
 import asyncio
@@ -24,11 +30,14 @@ from analyzer.orchestration.gate_adapter import build_gate_promotion_fn, compute
 from analyzer.orchestration.manual_run import run_training
 from analyzer.orchestration.metrics import TrainingMetrics
 from analyzer.orchestration.scheduler import (
+    DAILY_STALENESS_CHECK_JOB_ID,
     WEEKLY_FULL_RETRAIN_JOB_ID,
     SchedulerRegistry,
+    daily_staleness_check_trigger,
     weekly_full_retrain_trigger,
 )
 from analyzer.orchestration.ssh_dispatch import ParamikoSshConnection
+from analyzer.orchestration.staleness import detect_stale_models
 
 logger = get_logger(__name__)
 
@@ -112,6 +121,48 @@ def wire_weekly_retrain_job(
     scheduler.start()
 
 
+def wire_daily_staleness_check_job(
+    scheduler: SchedulerRegistry,
+    *,
+    config: AutomationConfig,
+    metrics: TrainingMetrics,
+) -> None:
+    """REQ-ATD-005/007/010: 일일 모델 정체 감지 cron 잡 하나만 개별
+    `register_cron_job()` 호출로 등록한다 — `register_default_jobs()`(월간
+    잡 포함)는 호출하지 않는다(GATE-001 REQ-ATG-001과 동일 원칙 계승).
+
+    스케줄러 기동(`start()`)은 `wire_weekly_retrain_job()`이 이미 수행하므로
+    이 함수는 잡 등록만 담당한다 — 이미 기동된 스케줄러에 `start()`를
+    재호출하면 `SchedulerAlreadyRunningError`가 발생하므로, `run()`에서
+    `wire_weekly_retrain_job()` 다음 순서로 호출되어야 한다.
+    """
+
+    def _daily_job() -> None:
+        try:
+            # REQ-ATD-007: models_root/threshold_days는 config에서만 읽는다
+            # — 콜백 내부에서 값을 재계산하거나 하드코딩하지 않는다.
+            results = detect_stale_models(
+                config.container_models_root,
+                threshold_days=config.staleness_threshold_days,
+            )
+        except Exception:
+            # REQ-ATD-010: 스캔 실패(마운트 부재/권한 거부/기타 I/O)는
+            # `handle_training_run_failure()`를 경유하지 않고
+            # `metrics.record_failure()`를 직접 호출해 기록한다
+            # (`failure.py`의 `FailureStage` Literal이 "staleness_scan"을
+            # 포함하지 않으며, `failure.py`는 이 SPEC의 PRESERVE 대상이다).
+            # 예외를 삼켜 스케줄러 스레드를 조용히 죽게 하지 않는다 — 구조화
+            # 로거(GATE-001 주간 잡과 동일 관례)로 기록한 뒤 재발생시킨다.
+            metrics.record_failure(stage="staleness_scan")
+            logger.error("daily staleness scan failed", exc_info=True)
+            raise
+        metrics.record_staleness_batch(results)
+
+    scheduler.register_cron_job(
+        DAILY_STALENESS_CHECK_JOB_ID, daily_staleness_check_trigger(), _daily_job
+    )
+
+
 async def run(host: str = "0.0.0.0", port: int = 8000) -> None:
     """상주 부모 프로세스를 시작한다: FastAPI 앱 + 주간 재학습 cron 잡 배선.
 
@@ -128,6 +179,9 @@ async def run(host: str = "0.0.0.0", port: int = 8000) -> None:
     scheduler = SchedulerRegistry()
 
     wire_weekly_retrain_job(scheduler, config=config, metrics=metrics)
+    # REQ-ATD-005: wire_weekly_retrain_job()이 scheduler.start()를 이미
+    # 수행했으므로, 일일 잡은 등록만(start() 재호출 없이) 뒤이어 추가한다.
+    wire_daily_staleness_check_job(scheduler, config=config, metrics=metrics)
 
     await consumer.start()
     logger.info(

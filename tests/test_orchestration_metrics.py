@@ -6,6 +6,8 @@
 `prometheus_client` 레지스트리에서 실제로 스크레이프 가능한지만 검증한다.
 """
 
+from datetime import date
+
 from prometheus_client import CollectorRegistry, generate_latest
 
 from analyzer.orchestration.metrics import (
@@ -15,6 +17,7 @@ from analyzer.orchestration.metrics import (
     TRAINING_RUN_TOTAL_NAME,
     TrainingMetrics,
 )
+from analyzer.orchestration.staleness import ModelStalenessInfo
 
 
 class TestTrainingMetricsSuccess:
@@ -192,6 +195,94 @@ class TestTrainingMetricsRankIcGauge:
 
     def test_rank_ic_gauge_follows_existing_naming_convention(self):
         assert RANK_IC_NAME.startswith("aaa_analyzer_training_")
+
+
+class TestTrainingMetricsStalenessBatch:
+    """SPEC-ANALYZER-TRAIN-STALENESS-001 M3(REQ-ATD-009, M4 선행 구현 —
+    일일 콜백 배선(M3)이 이 메서드 없이는 정상 동작할 수 없어 M3 커밋에 앞당겨
+    구현한다): `record_staleness_batch()`는 스캔 시작 시 `model_stale` 게이지
+    패밀리 전체를 초기화(clear)한 뒤 전달된 결과만 재기록한다 — 삭제된 조합의
+    값이 영구 잔존해서는 안 된다. 기존 `record_staleness()`(단건) 시그니처는
+    무수정이다."""
+
+    def test_clears_combo_not_present_in_new_batch(self):
+        registry = CollectorRegistry()
+        metrics = TrainingMetrics(registry=registry)
+        metrics.record_staleness(market="domestic", horizon=20, algorithm="lightgbm", is_stale=True)
+
+        metrics.record_staleness_batch([])
+
+        value = registry.get_sample_value(
+            MODEL_STALE_NAME, {"market": "domestic", "horizon": "20", "algorithm": "lightgbm"}
+        )
+        assert value is None
+
+    def test_records_all_combos_in_batch(self):
+        registry = CollectorRegistry()
+        metrics = TrainingMetrics(registry=registry)
+
+        results = [
+            ModelStalenessInfo(
+                market="domestic",
+                horizon=20,
+                algorithm="lightgbm",
+                most_recent_trained_date=date(2026, 1, 1),
+                is_stale=True,
+            ),
+            ModelStalenessInfo(
+                market="overseas",
+                horizon=60,
+                algorithm="xgboost",
+                most_recent_trained_date=date(2026, 8, 1),
+                is_stale=False,
+            ),
+        ]
+
+        metrics.record_staleness_batch(results)
+
+        stale_value = registry.get_sample_value(
+            MODEL_STALE_NAME, {"market": "domestic", "horizon": "20", "algorithm": "lightgbm"}
+        )
+        fresh_value = registry.get_sample_value(
+            MODEL_STALE_NAME, {"market": "overseas", "horizon": "60", "algorithm": "xgboost"}
+        )
+        assert stale_value == 1.0
+        assert fresh_value == 0.0
+
+    def test_stale_combo_from_prior_batch_is_cleared_when_absent_from_next(self):
+        """이전 스캔에서 정체로 기록된 조합이 모델 파일 삭제로 다음 스캔
+        결과에서 사라지면, 게이지 값이 영구 잔존하지 않고 사라져야 한다
+        (research.md D-11)."""
+        registry = CollectorRegistry()
+        metrics = TrainingMetrics(registry=registry)
+        metrics.record_staleness_batch(
+            [
+                ModelStalenessInfo(
+                    market="domestic",
+                    horizon=20,
+                    algorithm="lightgbm",
+                    most_recent_trained_date=date(2026, 1, 1),
+                    is_stale=True,
+                )
+            ]
+        )
+
+        metrics.record_staleness_batch(
+            [
+                ModelStalenessInfo(
+                    market="overseas",
+                    horizon=60,
+                    algorithm="xgboost",
+                    most_recent_trained_date=date(2026, 8, 1),
+                    is_stale=False,
+                )
+            ]
+        )
+
+        stale_gone = registry.get_sample_value(
+            MODEL_STALE_NAME, {"market": "domestic", "horizon": "20", "algorithm": "lightgbm"}
+        )
+        assert stale_gone is None
 
 
 class TestPrometheusScrapeSmoke:
