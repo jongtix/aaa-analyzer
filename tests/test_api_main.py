@@ -29,6 +29,7 @@ from analyzer.orchestration.scheduler import (
     SchedulerRegistry,
 )
 from analyzer.orchestration.ssh_dispatch import CommandResult
+from analyzer.orchestration.staleness import ModelStalenessInfo
 
 
 def _make_config(tmp_path: Path) -> AutomationConfig:
@@ -345,6 +346,165 @@ class TestWeeklyJobRealChainParamsFromActiveMeta:
         dispatch_command = fake_connection.executed_commands[0]
         assert "--params-from-active-meta" in dispatch_command
         assert str(config.active_models_root) in dispatch_command
+
+
+class TestWireDailyStalenessCheckJobRegistration:
+    """SPEC-ANALYZER-TRAIN-STALENESS-001 M3(REQ-ATD-005): 일일 정체 감지
+    잡은 개별 `register_cron_job()` 호출로 등록되어야 하며, `register_default_jobs()`
+    (월간 잡 포함)는 호출되어서는 안 된다. 주간 잡과 함께 등록하면
+    `registered_jobs()`는 정확히 `["weekly-full-retrain", "daily-staleness-check"]`
+    2건이어야 한다."""
+
+    def test_registers_exactly_weekly_and_daily_jobs(self, tmp_path: Path):
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+        config = _make_config(tmp_path)
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        main_module.wire_weekly_retrain_job(registry, config=config, metrics=metrics)
+        main_module.wire_daily_staleness_check_job(registry, config=config, metrics=metrics)
+
+        assert registry.registered_jobs() == [
+            WEEKLY_FULL_RETRAIN_JOB_ID,
+            DAILY_STALENESS_CHECK_JOB_ID,
+        ]
+        assert MONTHLY_OPTUNA_TUNING_JOB_ID not in registry.registered_jobs()
+
+    def test_does_not_call_register_default_jobs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+        config = _make_config(tmp_path)
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        called = {"invoked": False}
+
+        def _fake_register_default_jobs(*args, **kwargs):
+            called["invoked"] = True
+            return []
+
+        import analyzer.orchestration.scheduler as scheduler_module
+
+        monkeypatch.setattr(scheduler_module, "register_default_jobs", _fake_register_default_jobs)
+
+        main_module.wire_daily_staleness_check_job(registry, config=config, metrics=metrics)
+
+        assert called["invoked"] is False
+
+    def test_does_not_call_scheduler_start(self, tmp_path: Path):
+        """중복 `start()` 방지 — 스케줄러 기동은 `wire_weekly_retrain_job()`이
+        전담하므로, 일일 잡 등록 함수는 잡 등록만 담당하고 `start()`를
+        호출해서는 안 된다(이미 기동된 스케줄러에 `start()`를 재호출하면
+        `SchedulerAlreadyRunningError`가 발생한다)."""
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+        config = _make_config(tmp_path)
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        main_module.wire_daily_staleness_check_job(registry, config=config, metrics=metrics)
+
+        mock_scheduler.start.assert_not_called()
+
+
+class TestDailyStalenessCheckCallback:
+    """REQ-ATD-007/010: 콜백은 `detect_stale_models(models_root=config.container_models_root,
+    threshold_days=config.staleness_threshold_days)`를 호출해야 하며, 성공 시
+    `metrics.record_staleness_batch()`로, 실패 시 `metrics.record_failure(stage="staleness_scan")`
+    직접 호출 후 재발생으로 관측 가능해야 한다."""
+
+    def test_callback_calls_detect_stale_models_with_config_values(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+        config = _make_config(tmp_path)
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        captured: dict = {}
+
+        def fake_detect_stale_models(models_root, *, threshold_days, as_of=None):
+            captured["models_root"] = models_root
+            captured["threshold_days"] = threshold_days
+            return []
+
+        monkeypatch.setattr(main_module, "detect_stale_models", fake_detect_stale_models)
+
+        main_module.wire_daily_staleness_check_job(registry, config=config, metrics=metrics)
+
+        _, kwargs = mock_scheduler.add_job.call_args
+        daily_callback = kwargs.get("func") or mock_scheduler.add_job.call_args.args[0]
+        daily_callback()
+
+        assert captured["models_root"] == config.container_models_root
+        assert captured["threshold_days"] == config.staleness_threshold_days
+
+    def test_callback_records_staleness_batch_on_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+        config = _make_config(tmp_path)
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        fake_results = [
+            ModelStalenessInfo(
+                market="domestic",
+                horizon=20,
+                algorithm="lightgbm",
+                most_recent_trained_date=date(2026, 1, 1),
+                is_stale=True,
+            )
+        ]
+        monkeypatch.setattr(main_module, "detect_stale_models", lambda *_a, **_k: fake_results)
+
+        recorded_batch: list = []
+        monkeypatch.setattr(
+            metrics, "record_staleness_batch", lambda results: recorded_batch.extend(results)
+        )
+
+        main_module.wire_daily_staleness_check_job(registry, config=config, metrics=metrics)
+
+        _, kwargs = mock_scheduler.add_job.call_args
+        daily_callback = kwargs.get("func") or mock_scheduler.add_job.call_args.args[0]
+        daily_callback()
+
+        assert recorded_batch == fake_results
+
+    def test_callback_records_failure_and_reraises_on_scan_exception(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        """REQ-ATD-010: 스캔 실패(마운트 부재/권한 거부/기타 I/O)는
+        `handle_training_run_failure()`를 경유하지 않고
+        `metrics.record_failure(stage="staleness_scan")`를 직접 호출해 기록한
+        뒤 예외를 재발생시킨다 — 예외를 삼켜 스케줄러 스레드를 조용히
+        죽게 하지 않는다."""
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+        config = _make_config(tmp_path)
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        def _raise_permission_error(*_a, **_k):
+            raise PermissionError("mount not readable")
+
+        monkeypatch.setattr(main_module, "detect_stale_models", _raise_permission_error)
+
+        record_failure_mock = MagicMock()
+        monkeypatch.setattr(metrics, "record_failure", record_failure_mock)
+        record_staleness_batch_mock = MagicMock()
+        monkeypatch.setattr(metrics, "record_staleness_batch", record_staleness_batch_mock)
+
+        main_module.wire_daily_staleness_check_job(registry, config=config, metrics=metrics)
+
+        _, kwargs = mock_scheduler.add_job.call_args
+        daily_callback = kwargs.get("func") or mock_scheduler.add_job.call_args.args[0]
+
+        with caplog.at_level("ERROR"):
+            with pytest.raises(PermissionError):
+                daily_callback()
+
+        record_failure_mock.assert_called_once_with(stage="staleness_scan")
+        record_staleness_batch_mock.assert_not_called()
 
 
 class TestRunEntrypointFailFast:

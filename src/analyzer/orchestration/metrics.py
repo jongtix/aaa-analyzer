@@ -20,6 +20,8 @@ acceptance.md §D):
 
 from prometheus_client import REGISTRY, CollectorRegistry, Counter, Gauge
 
+from analyzer.orchestration.staleness import ModelStalenessInfo
+
 TRAINING_RUN_TOTAL_NAME = "aaa_analyzer_training_run_total"
 LAST_SUCCESS_TIMESTAMP_NAME = "aaa_analyzer_training_run_last_success_timestamp_seconds"
 MODEL_STALE_NAME = "aaa_analyzer_model_stale"
@@ -106,3 +108,19 @@ class TrainingMetrics:
         self.model_stale.labels(market=market, horizon=str(horizon), algorithm=algorithm).set(
             1.0 if is_stale else 0.0
         )
+
+    def record_staleness_batch(self, results: list[ModelStalenessInfo]) -> None:
+        """SPEC-ANALYZER-TRAIN-STALENESS-001(REQ-ATD-009): 일일 정체 스캔
+        결과를 일괄 재기록한다 — 스캔 시작 시 `model_stale` 게이지 패밀리
+        전체를 초기화(clear)한 뒤 `results`만 재기록해, 모델 파일이 삭제되어
+        더 이상 스캔되지 않는 조합의 값이 영구 잔존하지 않게 한다(research.md
+        D-11). 기존 `record_staleness()`(단건 기록) 시그니처는 변경하지
+        않는다 — 다른 호출자가 생길 경우를 대비한 하위 호환."""
+        self.model_stale.clear()
+        for info in results:
+            self.record_staleness(
+                market=info.market,
+                horizon=info.horizon,
+                algorithm=info.algorithm,
+                is_stale=info.is_stale,
+            )
