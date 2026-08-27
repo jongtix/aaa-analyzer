@@ -9,7 +9,9 @@ REQ-ATA-083이 등록하는 전용 일일 cron 잡을 통해 주기적으로 트
 
 `training/persistence.py`는 이 SPEC의 PRESERVE 대상이며 재정의하지 않는다 — 이
 모듈은 파일명 관례를 독립적으로(중복) 파싱할 뿐, `persistence.py`의 함수를
-호출하거나 그 내부 구현에 의존하지 않는다.
+호출하거나 그 내부 구현에 의존하지 않는다. 단, REQ-ATD-008(M4)이 도입한 확장자
+allowlist는 `persistence.py`의 `_NATIVE_EXTENSION` 값 집합을 참조만 한다(DRY,
+§B 리스크 5) — `persistence.py`의 함수 호출이나 내부 로직 의존은 여전히 없다.
 """
 
 import re
@@ -18,11 +20,21 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from analyzer.training.persistence import _NATIVE_EXTENSION
+
 _KST = ZoneInfo("Asia/Seoul")
+
+_ALLOWED_MODEL_EXTENSIONS = sorted(set(_NATIVE_EXTENSION.values()))
+"""REQ-ATD-008(§B 리스크 5): `training/persistence.py`의 `_NATIVE_EXTENSION`
+값 집합(`{"txt", "json"}`)에서 동적으로 파생한다 — 신규 알고리즘 도입 시
+`_NATIVE_EXTENSION`에 확장자가 추가되면 이 allowlist도 자동으로 갱신되는
+단일 소스(DRY) 방식을 택한다(하드코딩 독립 상수 대신). `persistence.py`는
+이 SPEC의 PRESERVE 대상이며 참조만 하고 재정의하지 않는다."""
 
 _MODEL_FILENAME_PATTERN = re.compile(
     r"^(?P<market>[a-z]+)_(?P<horizon>\d+)_(?P<algorithm>[a-z]+)_"
-    r"(?P<trained_date>\d{4}-\d{2}-\d{2})\.\w+$"
+    r"(?P<trained_date>\d{4}-\d{2}-\d{2})"
+    r"\.(?:" + "|".join(re.escape(ext) for ext in _ALLOWED_MODEL_EXTENSIONS) + r")$"
 )
 
 

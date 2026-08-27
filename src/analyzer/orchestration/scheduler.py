@@ -112,16 +112,26 @@ def weekly_full_retrain_trigger() -> CronTrigger:
 def monthly_optuna_tuning_trigger() -> CronTrigger:
     """REQ-ATA-081: 월간 Optuna 튜닝 — 매월 1일 1회, KST.
 
-    `daily_staleness_check_trigger()`(REQ-ATA-083)와 동일한 마감 이후 안전
-    여유 관례를 따라 07:00 KST로 고정한다 — 매월 1일 02:00 KST는 ET 기준 전일
-    정오 무렵으로 미장 정규장 마감 훨씬 이전이라 부적절하다.
+    미장 정규장 마감 이후 안전 여유를 두기 위해 07:00 KST로 고정한다 — 매월 1일
+    02:00 KST는 ET 기준 전일 정오 무렵으로 미장 정규장 마감 훨씬 이전이라
+    부적절하다. `daily_staleness_check_trigger()`(REQ-ATD-006)는 04:00 KST로
+    별도 조정됐으므로(모델 정체 감지는 학습 잡과 독립적인 스케줄, REQ-ATA-083)
+    더 이상 이 잡의 시각 관례 기준이 아니다 — 두 잡은 각자의 마감 이후 안전
+    여유를 독립적으로 산정한다.
     """
     return CronTrigger(day="1", hour=7, minute=0, timezone=_KST)
 
 
 def daily_staleness_check_trigger() -> CronTrigger:
-    """REQ-ATA-083: 모델 정체 감지 — 매일 1회, 학습 잡과 독립적인 별도 스케줄, KST."""
-    return CronTrigger(hour=7, minute=0, timezone=_KST)
+    """REQ-ATD-006: 모델 정체 감지 — 매일 1회, 학습 잡과 독립적인 별도 스케줄, KST.
+
+    04:00 KST로 고정한다(REQ-ATD-006, 기존 07:00 KST에서 변경) — 정체 감지는
+    가장 최근 활성 모델 파일의 `trained_date`만 비교하는 순수 읽기 스캔으로
+    미장 정규장 마감 안전 여유가 필요 없다(다른 두 학습 잡과 달리 신규
+    모델 파일을 산출하지 않는다). 더 이른 시각으로 당겨 새벽 관측 창을
+    넓힌다.
+    """
+    return CronTrigger(hour=4, minute=0, timezone=_KST)
 
 
 def register_default_jobs(
