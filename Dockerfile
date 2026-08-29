@@ -1,7 +1,7 @@
 # === Build stage ===
 # digest 고정: python:3.14-slim(3.14.6-slim-trixie)의 linux/amd64 플랫폼 전용 digest.
 # 버전 갱신 시 `docker manifest inspect python:3.14-slim --verbose`로 재확인.
-FROM python:3.14-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4 AS build
+FROM python:3.14-slim@sha256:cae66f2ef0ec51a9891263eeee7f987dacf0a9879e8aa9353d5606e0530619a5 AS build
 WORKDIR /analyzer
 
 # 릴리스 태그 버전 주입(REQ-020/AC-023): PSR이 commit: false로 동작해 pyproject.toml의
@@ -34,7 +34,7 @@ RUN uv sync --locked --no-dev
 # CVE-2026-53615 — Debian trixie에 수정판 2.41.5-0+deb13u1은 이미 게시됐으나 이 이미지가
 # 아직 반영하지 못한 상태)는 만료일 명시 `.trivyignore` 항목으로 처리한다
 # (SPEC-INFRA-CVE-SCAN-001 v0.8.1 REQ-CVE-016/022).
-FROM python:3.14-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4
+FROM python:3.14-slim@sha256:cae66f2ef0ec51a9891263eeee7f987dacf0a9879e8aa9353d5606e0530619a5
 
 # 시스템 pip 제거(REQ-CVE-021 후속): 이 이미지는 uv만 사용하고 시스템 pip을 런타임에
 # 전혀 호출하지 않는다. base 이미지가 내장한 pip 26.2.1이 벤더링한
