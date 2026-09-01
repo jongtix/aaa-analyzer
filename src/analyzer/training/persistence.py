@@ -126,6 +126,49 @@ def verify_model_integrity(model_path: Path, sidecar_path: Path) -> bool:
     return _sha256_of_file(model_path) == expected
 
 
+def enumerate_model_versions(
+    models_root: Path, market: str, horizon: int, algorithm: str
+) -> list[ModelVersion]:
+    """REQ-ATT-016: `model_dir()` 경로를 스캔해 기존 파일명 관례(REQ-AT-092)와
+    일치하는 네이티브 모델 파일 + `.sha256` 사이드카 **쌍**으로부터
+    `ModelVersion` 시퀀스를 구성한다(`trained_date` 오름차순).
+
+    사이드카가 없는 모델 파일, 파일명 관례에서 벗어난 파일, 그리고 아카이브로
+    이동된 버전은 결과에 포함되지 않는다 — 이 헬퍼는 active 경로만 스캔한다
+    (spec.md §4 알려진 한계 5). `apply_retention_policy()`는 수정하지 않는다
+    (PRESERVE).
+    """
+    if algorithm not in _NATIVE_EXTENSION:
+        raise ValueError(f"지원하지 않는 algorithm: {algorithm}")
+
+    target_dir = model_dir(models_root, market, horizon, algorithm)
+    if not target_dir.is_dir():
+        return []
+
+    ext = _NATIVE_EXTENSION[algorithm]
+    prefix = f"{market}_{horizon}_{algorithm}_"
+
+    versions: list[ModelVersion] = []
+    for model_path in target_dir.glob(f"{prefix}*.{ext}"):
+        sidecar_path = model_path.with_suffix(model_path.suffix + ".sha256")
+        if not sidecar_path.is_file():
+            continue
+        try:
+            trained_date = date.fromisoformat(model_path.name[len(prefix) : -(len(ext) + 1)])
+        except ValueError:
+            continue
+        versions.append(
+            ModelVersion(
+                trained_date=trained_date,
+                model_path=model_path,
+                sidecar_path=sidecar_path,
+                sha256=sidecar_path.read_text(encoding="utf-8").strip(),
+            )
+        )
+
+    return sorted(versions, key=lambda v: v.trained_date)
+
+
 def _create_archive_bundle(archive_path: Path, versions: Sequence[ModelVersion]) -> None:
     """월별 아카이브 tar.zst 번들을 생성한다 — 임베디드 매니페스트 포함(REQ-AT-093)."""
     manifest = [
