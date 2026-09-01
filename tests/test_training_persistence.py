@@ -5,6 +5,7 @@ REQ-AT-093/094/095(2단계 보존 + tar 무결성 + 영구 미삭제)를 검증�
 AC-AT-008/AC-AT-009의 worked example을 그대로 구현한다.
 """
 
+import hashlib
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
@@ -16,6 +17,7 @@ import pytest
 from analyzer.training.persistence import (
     ModelVersion,
     apply_retention_policy,
+    enumerate_model_versions,
     model_dir,
     model_filename,
     save_model_native,
@@ -182,3 +184,74 @@ class TestApplyRetentionPolicy:
         for v in to_be_archived:
             assert v.model_path.exists()
             assert v.sidecar_path.exists()
+
+
+class TestEnumerateModelVersions:
+    """AC-ATT-017(REQ-ATT-016): `model_dir()` 스캔으로 네이티브 모델 파일 +
+    `.sha256` 사이드카 쌍을 `ModelVersion` 시퀀스로 구성한다."""
+
+    @staticmethod
+    def _write_version(
+        models_root: Path,
+        market: str,
+        horizon: int,
+        algorithm: str,
+        trained_date: date,
+        payload: bytes,
+    ) -> tuple[Path, Path, str]:
+        target_dir = model_dir(models_root, market, horizon, algorithm)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        model_path = target_dir / model_filename(market, horizon, algorithm, trained_date)
+        model_path.write_bytes(payload)
+        sha256 = hashlib.sha256(payload).hexdigest()
+        sidecar_path = model_path.with_suffix(model_path.suffix + ".sha256")
+        sidecar_path.write_text(sha256, encoding="utf-8")
+        return model_path, sidecar_path, sha256
+
+    def test_ac_att_017_returns_five_versions_sorted_ascending_with_sidecar_hashes(
+        self, tmp_path: Path
+    ):
+        expected: dict[date, str] = {}
+        for day in (12, 5, 26, 19, 1):
+            trained_date = date(2026, 8, day)
+            _, _, sha256 = self._write_version(
+                tmp_path, "domestic", 20, "xgboost", trained_date, f"model-{day}".encode()
+            )
+            expected[trained_date] = sha256
+
+        versions = enumerate_model_versions(tmp_path, "domestic", 20, "xgboost")
+
+        assert len(versions) == 5
+        assert [v.trained_date for v in versions] == sorted(expected)
+        for version in versions:
+            assert version.sha256 == expected[version.trained_date]
+            assert version.sha256 == version.sidecar_path.read_text(encoding="utf-8").strip()
+            assert version.model_path.exists()
+
+    def test_returns_empty_list_when_directory_absent(self, tmp_path: Path):
+        assert enumerate_model_versions(tmp_path, "overseas", 5, "lightgbm") == []
+
+    def test_skips_model_file_without_sidecar(self, tmp_path: Path):
+        self._write_version(tmp_path, "domestic", 20, "xgboost", date(2026, 8, 1), b"paired")
+        _, orphan_sidecar, _ = self._write_version(
+            tmp_path, "domestic", 20, "xgboost", date(2026, 8, 8), b"orphan"
+        )
+        orphan_sidecar.unlink()
+
+        versions = enumerate_model_versions(tmp_path, "domestic", 20, "xgboost")
+
+        assert [v.trained_date for v in versions] == [date(2026, 8, 1)]
+
+    def test_ignores_other_combinations_in_the_same_root(self, tmp_path: Path):
+        self._write_version(tmp_path, "domestic", 20, "xgboost", date(2026, 8, 1), b"a")
+        self._write_version(tmp_path, "domestic", 20, "lightgbm", date(2026, 8, 1), b"b")
+        self._write_version(tmp_path, "overseas", 20, "xgboost", date(2026, 8, 1), b"c")
+
+        versions = enumerate_model_versions(tmp_path, "domestic", 20, "xgboost")
+
+        assert len(versions) == 1
+        assert versions[0].model_path.name == "domestic_20_xgboost_2026-08-01.json"
+
+    def test_rejects_unsupported_algorithm(self, tmp_path: Path):
+        with pytest.raises(ValueError, match="지원하지 않는 algorithm"):
+            enumerate_model_versions(tmp_path, "domestic", 20, "catboost")
