@@ -29,6 +29,10 @@ _REQUIRED_ENV = {
     "TRAIN_AUTOMATION_TRAINER_LOG_BASE_DIR": "/Users/mac/aaa/mnt/HDD_1/Development/aaa/logs",
     "MYSQL_DATABASE": "aaa",
     "MYSQL_TRAINER_PASSWORD": "trainer-secret",
+    "TRAIN_AUTOMATION_MONTHLY_OPTUNA_STORAGE_DIR": "/Users/mac/aaa/mnt/HDD_1/optuna/monthly",
+    "TRAIN_AUTOMATION_MONTHLY_SUMMARY_REPORT_PATH": (
+        "/Users/mac/aaa/mnt/HDD_1/reports/monthly-campaign-summary.json"
+    ),
 }
 
 
@@ -57,7 +61,7 @@ class TestGetAutomationConfig:
             db_tunnel_local_port=3306,
             db_tunnel_remote_port=3306,
             weekly_timeout_seconds=4 * 60 * 60,
-            monthly_timeout_seconds=36 * 60 * 60,
+            monthly_timeout_seconds=14 * 60 * 60,
             staleness_threshold_days=28,
             staging_models_root=Path("/staging/models"),
             active_models_root=Path("/models"),
@@ -70,6 +74,10 @@ class TestGetAutomationConfig:
             mysql_database="aaa",
             mysql_trainer_password="trainer-secret",
             trainer_log_base_dir=Path("/Users/mac/aaa/mnt/HDD_1/Development/aaa/logs"),
+            monthly_optuna_storage_dir=Path("/Users/mac/aaa/mnt/HDD_1/optuna/monthly"),
+            monthly_summary_report_path=Path(
+                "/Users/mac/aaa/mnt/HDD_1/reports/monthly-campaign-summary.json"
+            ),
         )
 
     def test_raises_when_required_env_var_missing(self, monkeypatch: pytest.MonkeyPatch):
@@ -134,13 +142,17 @@ class TestGetAutomationConfig:
 
         assert config.weekly_timeout_seconds == 4 * 60 * 60
 
-    def test_default_monthly_timeout_is_thirty_six_hours(self, monkeypatch: pytest.MonkeyPatch):
-        """REQ-ATA-040: 초기값은 월간 36시간."""
+    def test_default_monthly_timeout_is_fourteen_hours(self, monkeypatch: pytest.MonkeyPatch):
+        """REQ-ATT-012 (2026-09-01, 36h→14h 명시적 수정): 캠페인 자신의 내부
+        graceful-stop 상수 CAMPAIGN_TIMEOUT_HOURS=12.0 + SSH 세션 여유 2시간.
+        환경변수명(TRAIN_AUTOMATION_MONTHLY_TIMEOUT_SECONDS)과 dataclass
+        필드명은 무수정 — 기본값 숫자만 변경된다."""
         _set_required_env(monkeypatch)
 
         config = get_automation_config()
 
-        assert config.monthly_timeout_seconds == 36 * 60 * 60
+        assert config.monthly_timeout_seconds == 14 * 60 * 60
+        assert config.monthly_timeout_seconds == 50400
 
     def test_default_staleness_threshold_is_four_weeks(self, monkeypatch: pytest.MonkeyPatch):
         """REQ-ATA-072: 마지막 성공 재학습 후 4주(28일) 초과 시 정체."""
@@ -233,3 +245,45 @@ class TestGetAutomationConfig:
 
         assert config.mysql_database == "aaa"
         assert config.mysql_trainer_password == "reused-secret"
+
+    def test_raises_when_monthly_optuna_storage_dir_missing(self, monkeypatch: pytest.MonkeyPatch):
+        """AC-ATT-011 (REQ-ATT-010): 신규 필수 변수 누락 시 기존 일괄 검증
+        경로(get_automation_config())에 자동으로 편입되어 MissingConfigError가
+        발생하고 누락된 변수명이 메시지에 포함된다 — 별도 fail-fast 코드 불필요."""
+        _set_required_env(monkeypatch)
+        monkeypatch.delenv("TRAIN_AUTOMATION_MONTHLY_OPTUNA_STORAGE_DIR", raising=False)
+
+        with pytest.raises(MissingConfigError, match="TRAIN_AUTOMATION_MONTHLY_OPTUNA_STORAGE_DIR"):
+            get_automation_config()
+
+    def test_raises_when_monthly_summary_report_path_missing(self, monkeypatch: pytest.MonkeyPatch):
+        """AC-ATT-011 (REQ-ATT-011): 신규 필수 변수 누락 시 MissingConfigError."""
+        _set_required_env(monkeypatch)
+        monkeypatch.delenv("TRAIN_AUTOMATION_MONTHLY_SUMMARY_REPORT_PATH", raising=False)
+
+        with pytest.raises(
+            MissingConfigError, match="TRAIN_AUTOMATION_MONTHLY_SUMMARY_REPORT_PATH"
+        ):
+            get_automation_config()
+
+    def test_monthly_optuna_storage_dir_parses_as_path(self, monkeypatch: pytest.MonkeyPatch):
+        """REQ-ATT-010: 수동/애드혹 캠페인 재실행 storage 디렉터리와 분리된
+        월간 전용 Optuna storage 디렉터리 — Path로 파싱되어야 한다."""
+        _set_required_env(monkeypatch)
+        monkeypatch.setenv("TRAIN_AUTOMATION_MONTHLY_OPTUNA_STORAGE_DIR", "/other/optuna/monthly")
+
+        config = get_automation_config()
+
+        assert config.monthly_optuna_storage_dir == Path("/other/optuna/monthly")
+
+    def test_monthly_summary_report_path_parses_as_path(self, monkeypatch: pytest.MonkeyPatch):
+        """REQ-ATT-011: 월간 캠페인 요약 리포트 경로 — Path로 파싱되어야 한다."""
+        _set_required_env(monkeypatch)
+        monkeypatch.setenv(
+            "TRAIN_AUTOMATION_MONTHLY_SUMMARY_REPORT_PATH",
+            "/other/reports/monthly-summary.json",
+        )
+
+        config = get_automation_config()
+
+        assert config.monthly_summary_report_path == Path("/other/reports/monthly-summary.json")

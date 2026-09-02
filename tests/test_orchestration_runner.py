@@ -101,6 +101,8 @@ def _make_config(tmp_path: Path) -> AutomationConfig:
         mysql_database="aaa",
         mysql_trainer_password="trainer-secret",
         trainer_log_base_dir=tmp_path / "logs" / "aaa-analyzer",
+        monthly_optuna_storage_dir=tmp_path / "optuna" / "monthly",
+        monthly_summary_report_path=tmp_path / "reports" / "monthly-campaign-summary.json",
     )
 
 

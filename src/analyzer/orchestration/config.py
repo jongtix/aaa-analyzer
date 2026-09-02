@@ -5,9 +5,10 @@
 `os.environ`을 직접 읽는다. `.env`/`.env.*` 파일 자체는 절대 읽지 않는다(이미
 프로세스 환경에 반영된 값만 사용).
 
-타임아웃 초기값(REQ-ATA-040)은 주간 4시간/월간 36시간이며, 운영 중 튜닝될 것으로
-예상되므로 하드코딩하지 않고 환경변수 오버라이드를 지원한다. 모델 정체 임계값
-(REQ-ATA-072)의 초기값은 4주(28일)다.
+타임아웃 초기값(REQ-ATA-040)은 주간 4시간/월간 14시간(REQ-ATT-012, 2026-09-01
+36시간→14시간 명시적 수정)이며, 운영 중 튜닝될 것으로 예상되므로 하드코딩하지
+않고 환경변수 오버라이드를 지원한다. 모델 정체 임계값(REQ-ATA-072)의 초기값은
+4주(28일)다.
 """
 
 import os
@@ -21,7 +22,12 @@ _DEFAULT_DB_TUNNEL_USERNAME = "db_tunnel"
 _DEFAULT_DB_TUNNEL_SSH_PORT = 22
 _DEFAULT_DB_TUNNEL_PORT = 3306
 _DEFAULT_WEEKLY_TIMEOUT_SECONDS = 4 * 60 * 60
-_DEFAULT_MONTHLY_TIMEOUT_SECONDS = 36 * 60 * 60
+_DEFAULT_MONTHLY_TIMEOUT_SECONDS = 14 * 60 * 60
+"""REQ-ATT-012 (2026-09-01, 36h→14h 명시적 수정): 캠페인 자신의 내부
+graceful-stop 상수 CAMPAIGN_TIMEOUT_HOURS=12.0(campaign.py:85) + SSH 세션
+여유 2시간. 환경변수명/dataclass 필드명은 무수정 — `register_default_jobs()`가
+프로덕션에서 호출된 적이 없어(SPEC-ANALYZER-TRAIN-TUNING-001 §1.1) 이 필드의
+기존 프로덕션 소비자가 0건이므로 하위호환 이슈가 없다."""
 _DEFAULT_STALENESS_THRESHOLD_DAYS = 28
 _DEFAULT_CALENDAR_CODE = "KRX"
 _DEFAULT_FEATURE_CODE_VERSION = "v1"
@@ -43,6 +49,8 @@ _REQUIRED_ENV_VARS = (
     "TRAIN_AUTOMATION_TRAINER_LOG_BASE_DIR",
     "MYSQL_DATABASE",
     "MYSQL_TRAINER_PASSWORD",
+    "TRAIN_AUTOMATION_MONTHLY_OPTUNA_STORAGE_DIR",
+    "TRAIN_AUTOMATION_MONTHLY_SUMMARY_REPORT_PATH",
 )
 
 
@@ -128,6 +136,16 @@ class AutomationConfig:
     직접 읽지 않는다 — 이 필드가 이미 프로세스 환경에 반영된 리터럴 절대경로
     값만 소비한다(spec.md §4.5)."""
 
+    monthly_optuna_storage_dir: Path
+    """SPEC-ANALYZER-TRAIN-TUNING-001 REQ-ATT-010: 월간 cron 재실행 전용
+    Optuna storage 디렉터리 — 수동/애드혹 캠페인 재실행이 사용하는 storage
+    디렉터리와 분리된다(SQLite 파일 락 경합 회피). `tuning.create_or_resume_study()`의
+    `load_if_exists=True`(REQ-AT-100)는 무수정이므로 월간 재실행 간 trial이
+    이 디렉터리 안에서 누적된다."""
+    monthly_summary_report_path: Path
+    """SPEC-ANALYZER-TRAIN-TUNING-001 REQ-ATT-011: 월간 캠페인 요약 리포트
+    출력 경로."""
+
 
 def get_automation_config() -> AutomationConfig:
     """`TRAIN_AUTOMATION_*` 환경변수를 읽어 `AutomationConfig`를 구성한다.
@@ -190,4 +208,8 @@ def get_automation_config() -> AutomationConfig:
         mysql_database=os.environ["MYSQL_DATABASE"],
         mysql_trainer_password=os.environ["MYSQL_TRAINER_PASSWORD"],
         trainer_log_base_dir=Path(os.environ["TRAIN_AUTOMATION_TRAINER_LOG_BASE_DIR"]),
+        monthly_optuna_storage_dir=Path(os.environ["TRAIN_AUTOMATION_MONTHLY_OPTUNA_STORAGE_DIR"]),
+        monthly_summary_report_path=Path(
+            os.environ["TRAIN_AUTOMATION_MONTHLY_SUMMARY_REPORT_PATH"]
+        ),
     )
