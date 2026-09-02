@@ -5,6 +5,17 @@
 
 ### ✨
 
+- 월간 Optuna 재튜닝 cron 활성화 (SPEC-ANALYZER-TRAIN-TUNING-001 M1-M9, REQ-ATT-*)
+  - `monthly-optuna-tuning` cron 잡 신규 등록(매월 1일 06:00 KST) — `SchedulerRegistry.registered_jobs()`가 이제 `weekly-full-retrain`/`daily-staleness-check`/`monthly-optuna-tuning` 정확히 3건을 반환한다. `register_default_jobs()` 호출은 0건, `register_cron_job()` 개별 호출 3회로 전환(REQ-ATT-002/003/004)
+  - 원격 실행 벡터는 기존 주간 학습 스크립트(`analyzer.training.train`)가 아닌 캠페인 CLI(`python -m analyzer.training.campaign`)를 재사용 — `ssh_dispatch.build_remote_dispatch_command()`에서 골격을 추출해 신규 캠페인 디스패치 함수를 파생시켰다(바이트 동일성 회귀 테스트로 기존 주간 경로 무변경 확인, REQ-ATT-005/006/007)
+  - 캠페인 CLI에 `--n-trials` 선택 인자 추가 — 월간 cron은 이 값을 프로덕션 트라이얼 수로 전달, 생략 시 기존 기본값 유지(REQ-ATT-008)
+  - 월간 전용 설정 3종(`monthly_optuna_tuning_trigger()` day=1/hour=6/minute=0/Asia-Seoul, active_models_root/staging_models_root 구분 디스패치, max_instances=1/coalesce/misfire_grace_time 명시)을 GATE-001이 확립한 `SchedulerRegistry`/`TrainingMetrics` 싱글턴 패턴으로 재사용(REQ-ATT-010/011/012)
+  - 조합별(시장×horizon×algorithm 8개) 보존 정책 프로덕션 배선 지점 추가 — `persistence.apply_retention_policy()` 시그니처는 무수정, 소환 지점만 신설(REQ-ATT-017)
+  - 운영자 수동 롤백 CLI(`python -m analyzer.training.rollback`) 신설 — `--algorithm {lightgbm,xgboost}` 인자에 `choices` 제약을 부여해 오타 시 raw traceback 대신 argparse 표준 에러로 안내(REQ-ATT-018/019/020/024, review finding W3 수정 포함)
+  - 모델 버전 열거 헬퍼 추가 — 롤백 대상 후보 나열에 사용(REQ-ATT-016)
+  - 월간 캠페인 후처리(보존 정책 적용) 실패 경로에 `run_id` 상관관계 로깅 추가 — 캠페인 자체 성공/보존 정책만 실패라는 구분을 유지한 채 관측성을 강화(review finding W1 수정)
+  - `/moai review` 4관점 팬아웃 + sync-auditor 종합에서 Critical 0건, Warning 4건(W1/W3는 코드 수정 완료, W2는 SPEC 문서상 스케줄링 겹침 서술 정정, W4는 SSH 비밀번호 `ps` 노출 — 리뷰어 권고에 따라 침습도 대비 심각도가 낮아 별도 후속 과제로 이연, byte-identical 회귀 게이트 리스크 회피)
+  - 프로덕션 활성화는 별도 운영자 작업 대기 중 — NAS 측 실배포·운영 검증 미수행(TRAIN-STALENESS-001/TRAIN-GATE-001과 동일한 후속 절차)
 - 일일 모델 정체 감지 cron 활성화 (SPEC-ANALYZER-TRAIN-STALENESS-001 M1/M3/M4, REQ-ATD-*)
   - 신규 필수 환경변수 `TRAIN_AUTOMATION_CONTAINER_MODELS_ROOT` — 컨테이너 내부 활성 모델 마운트 경로. `AutomationConfig.container_models_root` 필드 + `_REQUIRED_ENV_VARS` 추가로 기존 기동 fail-fast 경로에 편입(REQ-ATD-003). NAS 호스트 측 `:ro` 마운트와 권한은 aaa-infra 몫
   - `api/main.py`에 `daily-staleness-check` 잡 개별 등록 — `detect_stale_models()` 호출 → 성공 시 `TrainingMetrics.record_staleness_batch()`, 실패 시 `record_failure(stage="staleness_scan")` 후 재발생하는 콜백 클로저 배선. GATE-001이 확립한 프로세스 싱글턴 `TrainingMetrics`를 재사용하며 콜백 내부에서 재생성하지 않는다. 등록 잡은 주간+일일 정확히 2건(월간은 여전히 미등록) (REQ-ATD-005/007/010)
