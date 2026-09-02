@@ -271,6 +271,65 @@ def connect_with_retry(
     return False
 
 
+def _build_db_tunnel_command(
+    *,
+    db_tunnel_host: str,
+    db_tunnel_key_path: Path,
+    db_tunnel_username: str,
+    db_tunnel_port: int,
+    db_tunnel_local_port: int,
+    db_tunnel_remote_port: int,
+) -> str:
+    """REQ-ATT-005: MySQL 터널 수립 셸 명령 조립 — 공유 골격의 1단계.
+
+    `build_remote_dispatch_command()`(주간 학습)와
+    `build_remote_campaign_dispatch_command()`(월간 캠페인) 양쪽이 동일하게
+    소비한다. 원본 `build_remote_dispatch_command()`의 `tunnel_command` 지역
+    변수 조립 로직을 그대로 옮긴 것으로, 출력 바이트는 변하지 않는다.
+    """
+    quoted_db_tunnel_key_path = shlex.quote(str(db_tunnel_key_path))
+    quoted_db_tunnel_username = shlex.quote(db_tunnel_username)
+    quoted_db_tunnel_host = shlex.quote(db_tunnel_host)
+    return (
+        f"ssh -f -N -o BatchMode=yes -o ExitOnForwardFailure=yes "
+        f"-i {quoted_db_tunnel_key_path} "
+        f"-p {db_tunnel_port} "
+        f"-L {db_tunnel_local_port}:127.0.0.1:{db_tunnel_remote_port} "
+        f"{quoted_db_tunnel_username}@{quoted_db_tunnel_host}"
+    )
+
+
+def _wrap_with_tunnel_mount_trap(
+    *,
+    tunnel_command: str,
+    mount_script_path: Path,
+    inner_command: str,
+    db_tunnel_local_port: int,
+    db_tunnel_remote_port: int,
+) -> str:
+    """REQ-ATT-005: 터널 수립 + 멱등 마운트 확인 + trap 기반 터널 해제 골격.
+
+    `build_remote_dispatch_command()`/`build_remote_campaign_dispatch_command()`
+    양쪽이 공유하는 원격 셸 스크립트 뼈대다. `inner_command`는 마운트 확인
+    통과 후 실행될 학습/캠페인 CLI 호출(및 그 tee 로깅)을 완성된 문자열로
+    그대로 받는다 — 이 함수는 그 내용을 알지 못한다(REQ-ATT-005/006 분리
+    원칙 — 골격 추출과 캠페인 CLI 호출 조립은 별개 책임이다).
+
+    원본 `build_remote_dispatch_command()`의 최종 반환문 조립 로직을 그대로
+    옮긴 것으로, 출력 바이트는 변하지 않는다(AC-ATT-006 회귀 가드).
+    """
+    quoted_mount_script_path = shlex.quote(str(mount_script_path))
+    tunnel_pattern = f"{db_tunnel_local_port}:127.0.0.1:{db_tunnel_remote_port}"
+    return (
+        f"set -o pipefail; "
+        f"{tunnel_command}; "
+        f"TUNNEL_PID=$(pgrep -f '{tunnel_pattern}'); "
+        f"trap 'kill $TUNNEL_PID 2>/dev/null' EXIT; "
+        f"{quoted_mount_script_path} && {inner_command}; "
+        f"exit $?"
+    )
+
+
 def build_remote_dispatch_command(
     *,
     staging_models_root: Path,
@@ -335,15 +394,11 @@ def build_remote_dispatch_command(
     된다. 미지정(기본값 `None`) 시 기존 명령 문자열과 byte-identical하다
     (하위 호환).
     """
-    quoted_db_tunnel_key_path = shlex.quote(str(db_tunnel_key_path))
-    quoted_db_tunnel_username = shlex.quote(db_tunnel_username)
-    quoted_db_tunnel_host = shlex.quote(db_tunnel_host)
     quoted_calendar_code = shlex.quote(calendar_code)
     quoted_cache_dir = shlex.quote(str(cache_dir))
     quoted_staging_models_root = shlex.quote(str(staging_models_root))
     quoted_data_as_of = shlex.quote(data_as_of.isoformat())
     quoted_feature_code_version = shlex.quote(feature_code_version)
-    quoted_mount_script_path = shlex.quote(str(mount_script_path))
     quoted_python_executable_path = shlex.quote(str(python_executable_path))
     quoted_mysql_database = shlex.quote(mysql_database)
     quoted_mysql_trainer_password = shlex.quote(mysql_trainer_password)
@@ -357,14 +412,14 @@ def build_remote_dispatch_command(
         else ""
     )
 
-    tunnel_command = (
-        f"ssh -f -N -o BatchMode=yes -o ExitOnForwardFailure=yes "
-        f"-i {quoted_db_tunnel_key_path} "
-        f"-p {db_tunnel_port} "
-        f"-L {db_tunnel_local_port}:127.0.0.1:{db_tunnel_remote_port} "
-        f"{quoted_db_tunnel_username}@{quoted_db_tunnel_host}"
+    tunnel_command = _build_db_tunnel_command(
+        db_tunnel_host=db_tunnel_host,
+        db_tunnel_key_path=db_tunnel_key_path,
+        db_tunnel_username=db_tunnel_username,
+        db_tunnel_port=db_tunnel_port,
+        db_tunnel_local_port=db_tunnel_local_port,
+        db_tunnel_remote_port=db_tunnel_remote_port,
     )
-    mount_command = quoted_mount_script_path
     train_command = (
         # F3: mkdir -p로 트레이너 로그 디렉터리를 tee보다 먼저 생성한다 —
         # promote_staging_to_active()의 mkdir -p 관례와 동일하게, 디렉터리가
@@ -393,14 +448,109 @@ def build_remote_dispatch_command(
         f"2>&1 | tee {quoted_trainer_log_path}"
     )
 
-    tunnel_pattern = f"{db_tunnel_local_port}:127.0.0.1:{db_tunnel_remote_port}"
-    return (
-        f"set -o pipefail; "
-        f"{tunnel_command}; "
-        f"TUNNEL_PID=$(pgrep -f '{tunnel_pattern}'); "
-        f"trap 'kill $TUNNEL_PID 2>/dev/null' EXIT; "
-        f"{mount_command} && {train_command}; "
-        f"exit $?"
+    return _wrap_with_tunnel_mount_trap(
+        tunnel_command=tunnel_command,
+        mount_script_path=mount_script_path,
+        inner_command=train_command,
+        db_tunnel_local_port=db_tunnel_local_port,
+        db_tunnel_remote_port=db_tunnel_remote_port,
+    )
+
+
+def build_remote_campaign_dispatch_command(
+    *,
+    active_models_root: Path,
+    calendar_code: str,
+    cache_dir: Path,
+    data_as_of: date,
+    feature_code_version: str,
+    optuna_storage_dir: Path,
+    summary_report_path: Path,
+    n_trials: int,
+    db_tunnel_host: str,
+    db_tunnel_key_path: Path,
+    mount_script_path: Path,
+    python_executable_path: Path,
+    mysql_database: str,
+    mysql_trainer_password: str,
+    trainer_log_base_dir: Path,
+    run_id: str,
+    db_tunnel_username: str = "db_tunnel",
+    db_tunnel_port: int = 22,
+    db_tunnel_local_port: int = 3306,
+    db_tunnel_remote_port: int = 3306,
+) -> str:
+    """REQ-ATT-006/007/009: 월간 원격 캠페인 CLI(`python -m
+    analyzer.training.campaign`) 디스패치 명령을, `build_remote_dispatch_command()`
+    (주간 학습)와 동일한 REQ-ATT-005 공유 골격(터널 수립 + 멱등 마운트 확인 +
+    trap 기반 터널 해제) 위에 조립한다.
+
+    `active_models_root`는 REQ-ATT-007에 따라 반드시 `AutomationConfig.
+    active_models_root`여야 한다(호출자 책임 — 이 함수는 전달값을 그대로
+    `--models-root`에 사용할 뿐 스테이징/활성 여부를 스스로 판정하지 않는다).
+    캠페인 자신의 `run_walk_forward_campaign_and_activate()`가
+    `activate_market_horizon_combo()`를 통해 이 경로에 직접 활성화를 기록하므로,
+    주간 학습의 `promote_staging_to_active()` 승격 단계는 이 경로에 존재하지
+    않는다(REQ-ATT-013).
+
+    `n_trials`는 호출자가 명시적으로 전달해야 한다(REQ-ATT-009 — 월간
+    원격 디스패치는 100을 전달한다) — 이 함수 자체는 기본값을 갖지 않는다.
+
+    캠페인 CLI의 확정된 인자 관례(campaign.py `main()`) —
+    `--calendar-code`/`--cache-dir`/`--models-root`/`--data-as-of`/
+    `--feature-code-version`/`--optuna-storage-dir`/`--summary-report-path` —
+    를 그대로 전달하며 재정의하지 않는다(REQ-ATT-006). 캠페인도
+    `build_trainer_engine()`(`training/db.py`)을 통해 동일한 `trainer` 계정
+    MySQL 접속을 요구하므로, 주간 학습 경로와 동일한 db_tunnel MySQL 환경변수
+    주입 + `mkdir -p` + tee 트레이너 로그 관례를 재사용한다.
+    """
+    quoted_calendar_code = shlex.quote(calendar_code)
+    quoted_cache_dir = shlex.quote(str(cache_dir))
+    quoted_active_models_root = shlex.quote(str(active_models_root))
+    quoted_data_as_of = shlex.quote(data_as_of.isoformat())
+    quoted_feature_code_version = shlex.quote(feature_code_version)
+    quoted_optuna_storage_dir = shlex.quote(str(optuna_storage_dir))
+    quoted_summary_report_path = shlex.quote(str(summary_report_path))
+    quoted_python_executable_path = shlex.quote(str(python_executable_path))
+    quoted_mysql_database = shlex.quote(mysql_database)
+    quoted_mysql_trainer_password = shlex.quote(mysql_trainer_password)
+    quoted_run_id = shlex.quote(run_id)
+    trainer_log_path = trainer_log_base_dir / f"trainer_{run_id}.log"
+    quoted_trainer_log_path = shlex.quote(str(trainer_log_path))
+    quoted_trainer_log_base_dir = shlex.quote(str(trainer_log_base_dir))
+
+    tunnel_command = _build_db_tunnel_command(
+        db_tunnel_host=db_tunnel_host,
+        db_tunnel_key_path=db_tunnel_key_path,
+        db_tunnel_username=db_tunnel_username,
+        db_tunnel_port=db_tunnel_port,
+        db_tunnel_local_port=db_tunnel_local_port,
+        db_tunnel_remote_port=db_tunnel_remote_port,
+    )
+    campaign_command = (
+        f"mkdir -p {quoted_trainer_log_base_dir} && "
+        f"MYSQL_HOST=127.0.0.1 MYSQL_PORT={db_tunnel_local_port} "
+        f"MYSQL_DATABASE={quoted_mysql_database} "
+        f"MYSQL_TRAINER_PASSWORD={quoted_mysql_trainer_password} "
+        f"TRAIN_RUN_ID={quoted_run_id} "
+        f"{quoted_python_executable_path} -m analyzer.training.campaign "
+        f"--calendar-code {quoted_calendar_code} "
+        f"--cache-dir {quoted_cache_dir} "
+        f"--models-root {quoted_active_models_root} "
+        f"--data-as-of {quoted_data_as_of} "
+        f"--feature-code-version {quoted_feature_code_version} "
+        f"--optuna-storage-dir {quoted_optuna_storage_dir} "
+        f"--summary-report-path {quoted_summary_report_path} "
+        f"--n-trials {n_trials} "
+        f"2>&1 | tee {quoted_trainer_log_path}"
+    )
+
+    return _wrap_with_tunnel_mount_trap(
+        tunnel_command=tunnel_command,
+        mount_script_path=mount_script_path,
+        inner_command=campaign_command,
+        db_tunnel_local_port=db_tunnel_local_port,
+        db_tunnel_remote_port=db_tunnel_remote_port,
     )
 
 

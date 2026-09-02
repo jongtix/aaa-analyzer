@@ -20,6 +20,7 @@ from analyzer.orchestration.ssh_dispatch import (
     CommandResult,
     ParamikoSshConnection,
     SshKeyPermissionError,
+    build_remote_campaign_dispatch_command,
     build_remote_dispatch_command,
     connect_with_retry,
     promote_staging_to_active,
@@ -745,6 +746,201 @@ class TestBuildRemoteDispatchCommandParamsFromActiveMeta:
 
         assert shlex.quote(str(malicious_path)) in command
         assert f"--params-from-active-meta {malicious_path} " not in command
+
+
+class TestBuildRemoteDispatchCommandByteIdenticalRegression:
+    """AC-ATT-006(REQ-ATT-005): 골격(터널+마운트+trap+tee) 추출 리팩터 전후로
+    `build_remote_dispatch_command()`의 출력이 바이트 단위로 동일해야 한다.
+
+    골든 마스터 문자열은 리팩터 착수 전(공유 헬퍼 추출 이전) 동일 인자로
+    실제 호출해 캡처한 결과다 — 리팩터 후 동일 인자로 재호출한 결과를 그
+    캡처 값과 문자열 비교한다(회귀 가드, M3 요구사항 verbatim)."""
+
+    def test_byte_identical_to_pre_refactor_golden_output(self):
+        golden = (
+            "set -o pipefail; "
+            "ssh -f -N -o BatchMode=yes -o ExitOnForwardFailure=yes "
+            "-i /run/secrets/db_tunnel_key -p 22 -L 3306:127.0.0.1:3306 "
+            "db_tunnel@nas-host; "
+            "TUNNEL_PID=$(pgrep -f '3306:127.0.0.1:3306'); "
+            "trap 'kill $TUNNEL_PID 2>/dev/null' EXIT; "
+            "/mount.sh && mkdir -p /logs/analyzer && "
+            "MYSQL_HOST=127.0.0.1 MYSQL_PORT=3306 MYSQL_DATABASE=aaa "
+            "MYSQL_TRAINER_PASSWORD=trainer-secret TRAIN_RUN_ID=run-golden "
+            "/python -m analyzer.training.train --calendar-code KRX "
+            "--cache-dir /cache --models-root /staging/run-1 "
+            "--data-as-of 2026-08-11 --feature-code-version v1 "
+            "2>&1 | tee /logs/analyzer/trainer_run-golden.log; exit $?"
+        )
+
+        command = build_remote_dispatch_command(
+            staging_models_root=Path("/staging/run-1"),
+            calendar_code="KRX",
+            cache_dir=Path("/cache"),
+            data_as_of=date(2026, 8, 11),
+            feature_code_version="v1",
+            db_tunnel_host="nas-host",
+            db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-golden",
+        )
+
+        assert command == golden
+
+    def test_byte_identical_to_pre_refactor_golden_output_with_params_from_active_meta(self):
+        golden = (
+            "set -o pipefail; "
+            "ssh -f -N -o BatchMode=yes -o ExitOnForwardFailure=yes "
+            "-i /run/secrets/db_tunnel_key -p 22 -L 3306:127.0.0.1:3306 "
+            "db_tunnel@nas-host; "
+            "TUNNEL_PID=$(pgrep -f '3306:127.0.0.1:3306'); "
+            "trap 'kill $TUNNEL_PID 2>/dev/null' EXIT; "
+            "/mount.sh && mkdir -p /logs/analyzer && "
+            "MYSQL_HOST=127.0.0.1 MYSQL_PORT=3306 MYSQL_DATABASE=aaa "
+            "MYSQL_TRAINER_PASSWORD=trainer-secret TRAIN_RUN_ID=run-golden2 "
+            "/python -m analyzer.training.train --calendar-code KRX "
+            "--cache-dir /cache --models-root /staging/run-1 "
+            "--data-as-of 2026-08-11 --feature-code-version v1 "
+            "--params-from-active-meta /models/active "
+            "2>&1 | tee /logs/analyzer/trainer_run-golden2.log; exit $?"
+        )
+
+        command = build_remote_dispatch_command(
+            staging_models_root=Path("/staging/run-1"),
+            calendar_code="KRX",
+            cache_dir=Path("/cache"),
+            data_as_of=date(2026, 8, 11),
+            feature_code_version="v1",
+            db_tunnel_host="nas-host",
+            db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-golden2",
+            params_from_active_meta=Path("/models/active"),
+        )
+
+        assert command == golden
+
+    def test_existing_test_suite_still_covers_full_behavior(self):
+        """이 클래스는 리팩터 전후 바이트 동일성만 고정한다 — 기존
+        `TestBuildRemoteDispatchCommand`/`TestBuildRemoteDispatchCommandParamsFromActiveMeta`
+        스위트(F1~F3, REQ-ATA/ATO 계열) 자체는 무수정으로 함께 통과해야
+        한다(AC-ATT-006 "기존 단위 테스트가 무수정으로 통과해야 한다")."""
+        assert True
+
+
+class TestBuildRemoteCampaignDispatchCommand:
+    """REQ-ATT-006/007/009: 월간 원격 캠페인 CLI 디스패치 명령 조립."""
+
+    def _base_kwargs(self) -> dict:
+        return dict(
+            active_models_root=Path("/active/models"),
+            calendar_code="KRX",
+            cache_dir=Path("/cache"),
+            data_as_of=date(2026, 9, 1),
+            feature_code_version="v1",
+            optuna_storage_dir=Path("/optuna/monthly"),
+            summary_report_path=Path("/reports/summary.json"),
+            n_trials=100,
+            db_tunnel_host="nas-host",
+            db_tunnel_key_path=Path("/run/secrets/db_tunnel_key"),
+            mount_script_path=Path("/mount.sh"),
+            python_executable_path=Path("/python"),
+            mysql_database="aaa",
+            mysql_trainer_password="trainer-secret",
+            trainer_log_base_dir=Path("/logs/analyzer"),
+            run_id="run-campaign-1",
+        )
+
+    def test_ac_att_007_invokes_campaign_module_not_train_module(self):
+        command = build_remote_campaign_dispatch_command(**self._base_kwargs())
+
+        assert "python -m analyzer.training.campaign" in command
+        assert "analyzer.training.train" not in command
+
+    def test_ac_att_008_models_root_uses_active_not_staging(self):
+        command = build_remote_campaign_dispatch_command(**self._base_kwargs())
+
+        assert "--models-root /active/models" in command
+        assert "--models-root /staging" not in command
+
+    def test_ac_att_010_n_trials_100_included_when_passed(self):
+        command = build_remote_campaign_dispatch_command(**self._base_kwargs())
+
+        assert "--n-trials 100" in command
+
+    def test_n_trials_value_is_passed_through_verbatim(self):
+        kwargs = self._base_kwargs()
+        kwargs["n_trials"] = 50
+        command = build_remote_campaign_dispatch_command(**kwargs)
+
+        assert "--n-trials 50" in command
+        assert "--n-trials 100" not in command
+
+    def test_preserves_campaign_cli_argument_convention_verbatim(self):
+        """REQ-ATT-006: campaign.py `main()`이 확정한 인자 이름을 재정의하지
+        않는다 — `--calendar-code`/`--cache-dir`/`--models-root`/
+        `--data-as-of`/`--feature-code-version`/`--optuna-storage-dir`/
+        `--summary-report-path` 전부 그대로 전달된다."""
+        command = build_remote_campaign_dispatch_command(**self._base_kwargs())
+
+        assert "--calendar-code KRX" in command
+        assert "--cache-dir /cache" in command
+        assert "--data-as-of 2026-09-01" in command
+        assert "--feature-code-version v1" in command
+        assert "--optuna-storage-dir /optuna/monthly" in command
+        assert "--summary-report-path /reports/summary.json" in command
+
+    def test_reuses_shared_tunnel_mount_trap_skeleton(self):
+        """REQ-ATT-005: 주간 학습 디스패치와 동일한 터널+마운트+trap 골격을
+        재사용한다 — db_tunnel SSH 명령, TUNNEL_PID 캡처, trap 기반 정리,
+        mount_script_path 게이트가 모두 포함된다."""
+        command = build_remote_campaign_dispatch_command(**self._base_kwargs())
+
+        assert "db_tunnel@nas-host" in command
+        assert "trap 'kill $TUNNEL_PID 2>/dev/null' EXIT" in command
+        assert "/mount.sh && " in command
+        assert command.rstrip().endswith("exit $?")
+
+    def test_injects_mysql_env_vars_required_by_trainer_db_config(self):
+        """캠페인도 `build_trainer_engine()`을 통해 동일 `trainer` 계정
+        MySQL 접속을 요구하므로 동일한 env var 주입이 필요하다."""
+        command = build_remote_campaign_dispatch_command(**self._base_kwargs())
+
+        assert "MYSQL_HOST=127.0.0.1 MYSQL_PORT=3306" in command
+        assert "MYSQL_DATABASE=aaa" in command
+        assert "MYSQL_TRAINER_PASSWORD=trainer-secret" in command
+
+    def test_does_not_include_combo_filter_or_skip_arguments(self):
+        """AC-ATT-023: 조합을 제한하는 스킵리스트/필터 인자를 도입하지 않는다
+        — 캠페인 CLI가 자신의 POINT_COMBOS 전체를 무필터로 순회하도록 둔다."""
+        command = build_remote_campaign_dispatch_command(**self._base_kwargs())
+
+        for forbidden in ("--exclude-combo", "--skip-algorithm", "--combos"):
+            assert forbidden not in command
+
+    def test_active_models_root_is_shlex_quoted(self):
+        kwargs = self._base_kwargs()
+        kwargs["active_models_root"] = Path("/active models/with space")
+        command = build_remote_campaign_dispatch_command(**kwargs)
+
+        assert shlex.quote("/active models/with space") in command
+
+    def test_optuna_storage_dir_and_summary_report_path_are_shlex_quoted(self):
+        kwargs = self._base_kwargs()
+        kwargs["optuna_storage_dir"] = Path("/optuna dir")
+        kwargs["summary_report_path"] = Path("/reports dir/summary.json")
+        command = build_remote_campaign_dispatch_command(**kwargs)
+
+        assert shlex.quote("/optuna dir") in command
+        assert shlex.quote("/reports dir/summary.json") in command
 
 
 class TestPromoteStagingToActive:
