@@ -84,6 +84,8 @@ class TestMainEntrypoint:
             mysql_database="aaa",
             mysql_trainer_password="trainer-secret",
             trainer_log_base_dir=tmp_path / "logs" / "aaa-analyzer",
+            monthly_optuna_storage_dir=tmp_path / "optuna" / "monthly",
+            monthly_summary_report_path=tmp_path / "reports" / "monthly-campaign-summary.json",
         )
         # 전역 Prometheus 레지스트리 오염 방지(테스트 격리) — TrainingMetrics()가
         # 기본 인자로 REGISTRY를 사용하면 다른 테스트의 레지스트리 격리 검증과
