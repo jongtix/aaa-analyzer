@@ -16,7 +16,9 @@ AAA(Algorithmic Alpha Advisor) Phase 2 ML 분석 서비스. 시장 데이터 기
 > SPEC-ANALYZER-TRAIN-EVAL-001(역사적 Walk-Forward 캠페인으로 시장×horizon×algorithm 8개 조합의
 > 표본외 성능을 주간 폴드 단위로 측정하고, 롤링 집계 기반 안정화 게이트 통과 조합에 대해 챔피언을
 > 선정해 활성화 매니페스트 기반 1차 배포 + 상시 챔피언/챌린저 게이트로 이어지는 오프라인 검증/배포
-> 계층) 범위로 한정된다.
+> 계층) + SPEC-ANALYZER-TRAIN-TUNING-001(매월 1일 06:00 KST `monthly-optuna-tuning` cron으로
+> 캠페인 CLI를 원격 재사용 디스패치해 Optuna 하이퍼파라미터를 재튜닝하고, 조합별 보존 정책 +
+> 운영자 수동 롤백 CLI로 안전망을 갖춘 3번째 cron 잡) 범위로 한정된다.
 > 추론 로직은 후속 SPEC(INFER-001 등)에서 구현된다.
 
 ## Stack
@@ -34,7 +36,7 @@ src/analyzer/
 ├── data/           # DB 읽기 계층 + SPLIT/DIVIDEND 가격 조정 엔진(as-of point-in-time)
 ├── features/       # 기술적 지표(KBAR+ROC/MA/STD/RANK/CORR) + 수급 피처 + PRICE_DERIVED/FROZEN 분류 레지스트리
 ├── labels/         # 학습 레이블(타깃) 생성 — T+H as-of 가격 조정 기반 실현 수익률, 거래정지/가용범위 NaN 처리, purge gap
-├── training/        # 모델 학습 코어 — 데이터셋 조립, walk-forward 검증, LightGBM+XGBoost 학습, Optuna 튜닝, 앙상블 스코어링, SHA-256 무결성 검증 모델 영속화(진입점: python -m analyzer.training.train) + 역사적 Walk-Forward 캠페인 평가/안정화 게이트/챔피언 선정(진입점: python -m analyzer.training.campaign, cron 미등록)
+├── training/        # 모델 학습 코어 — 데이터셋 조립, walk-forward 검증, LightGBM+XGBoost 학습, Optuna 튜닝, 앙상블 스코어링, SHA-256 무결성 검증 모델 영속화(진입점: python -m analyzer.training.train) + 역사적 Walk-Forward 캠페인 평가/안정화 게이트/챔피언 선정(진입점: python -m analyzer.training.campaign, --n-trials 선택 인자, monthly-optuna-tuning cron 등록) + 운영자 수동 롤백 CLI(진입점: python -m analyzer.training.rollback --algorithm {lightgbm,xgboost})
 ├── inference/       # 완결형 자식 CLI 추론 진입점
 ├── orchestration/   # WoL 매직패킷 송신 + SSH 원격 디스패치(MySQL 터널) + SchedulerRegistry cron 확장 + 모델 정체(staleness) 감지 + Prometheus 계측 + 통합 실패 처리 경로(진입점: analyzer.orchestration.runner)
 └── api/             # FastAPI 부모 프로세스 (/health, /metrics)
