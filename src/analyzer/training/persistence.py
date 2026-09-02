@@ -32,6 +32,13 @@ import xgboost as xgb
 
 _NATIVE_EXTENSION: dict[str, str] = {"lightgbm": "txt", "xgboost": "json"}
 
+MONTHLY_ACTIVE_COUNT: int = 36
+"""REQ-ATT-017: 월간 성공 후처리가 `apply_retention_policy()`에 명시적으로 전달하는
+active 유지 개수(2026-09-01 review-4 대응으로 12→36 상향). 주간(52)+월간(12) 합산
+연 ~64회 프로모션 기준 약 6.75개월의 롤백 가능 윈도우에 해당한다.
+`apply_retention_policy()` 자체의 파라미터 기본값 12는 무수정(PRESERVE)이다.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class SavedModel:
@@ -260,3 +267,45 @@ def apply_retention_policy(
         archived_months.append(month_key)
 
     return RetentionResult(active=active, archived_months=archived_months)
+
+
+def combo_archive_root(models_root: Path, market: str, horizon: int, algorithm: str) -> Path:
+    """아카이브 경로 관례: `{models_root}/archive/{market}/{horizon}/{algorithm}/`.
+
+    최상위 아카이브 루트는 기존 관례대로 `models_root/archive` 하나이며(신규
+    최상위 경로 신설 없음), 그 아래를 `model_dir()`과 동일한 조합 세그먼트로
+    분할한다 — `apply_retention_policy()`가 월 키(`{YYYY-MM}.tar.zst`)만으로
+    번들 이름을 정하므로, 조합별로 분할하지 않으면 같은 달에 아카이브되는 서로
+    다른 조합의 번들이 동일 경로에 덮어써진다.
+    """
+    return models_root / "archive" / market / str(horizon) / algorithm
+
+
+def apply_retention_for_combos(
+    models_root: Path,
+    combos: Sequence[tuple[str, int, str]],
+    active_count: int = MONTHLY_ACTIVE_COUNT,
+) -> dict[tuple[str, int, str], RetentionResult]:
+    """REQ-ATT-017: 조합별 보존 정책 실행 — 월간 성공 후처리의 호출 지점.
+
+    각 (시장, horizon, algorithm) 조합에 대해 `enumerate_model_versions()`(M1)로
+    active 버전을 열거하고, 그 결과를 `apply_retention_policy()`에 `active_count`
+    (기본 `MONTHLY_ACTIVE_COUNT=36`)와 조합별 `archive_root`와 함께 전달한다.
+    `apply_retention_policy()`는 수정하지 않고 소환만 한다(PRESERVE).
+
+    조합 목록의 출처(캠페인 요약 리포트 또는 `POINT_COMBOS` 순회)는 이 함수의
+    호출자(월간 후처리 훅) 소관이므로 여기서 결정하지 않는다.
+
+    한 조합의 아카이브 무결성 검증이 실패하면 `apply_retention_policy()`가
+    `ValueError`를 발생시키며, 그 예외는 그대로 전파된다 — 실패한 조합의 원본은
+    보존되고 이후 조합은 처리되지 않는다.
+    """
+    results: dict[tuple[str, int, str], RetentionResult] = {}
+    for market, horizon, algorithm in combos:
+        versions = enumerate_model_versions(models_root, market, horizon, algorithm)
+        results[(market, horizon, algorithm)] = apply_retention_policy(
+            versions,
+            archive_root=combo_archive_root(models_root, market, horizon, algorithm),
+            active_count=active_count,
+        )
+    return results
