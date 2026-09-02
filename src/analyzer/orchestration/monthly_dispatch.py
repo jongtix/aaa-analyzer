@@ -169,7 +169,19 @@ def execute_monthly_campaign_run(
             # 시 apply_retention_for_combos()가 전파하는 ValueError는 그대로
             # 다시 전파된다(성공 기록은 이미 마쳤으므로 record_failure를
             # 별도로 호출하지 않는다 — 캠페인 자체는 성공했다).
-            apply_retention_for_combos(config.active_models_root, combos)
+            # review finding W1: 이 호출은 이전까지 무가드 상태였다 — 예외가
+            # APScheduler 내부 로거로만 흘러가 run_id 상관관계가 끊기는 것을
+            # 막기 위해 구조화 로그(run_id 포함) 기록 후 재발생시킨다.
+            try:
+                apply_retention_for_combos(config.active_models_root, combos)
+            except Exception:
+                _logger.error(
+                    "monthly campaign retention step failed after successful run run_id=%s",
+                    run_id,
+                    exc_info=True,
+                    extra={"stage_marker": True},
+                )
+                raise
         finally:
             connection.close()
     finally:

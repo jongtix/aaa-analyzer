@@ -211,14 +211,24 @@ def wire_monthly_optuna_tuning_job(
         # 기록(metrics.record_success/record_failure)을 이미 내부에서
         # 수행하므로, 이 콜백은 예외를 잡지 않고 그대로 전파한다(이중 기록
         # 방지 — 일일 잡의 metrics.record_failure 직접 호출 경로와 동일 원칙).
-        execute_monthly_campaign_run(
-            run_id=run_id,
-            data_as_of=data_as_of,
-            config=config,
-            wol_sender=wol_sender,
-            connection_factory=connection_factory,
-            metrics=metrics,
-        )
+        # review finding W1: 다만 _fail()이 커버하지 않는 예상 밖 예외
+        # (connection_factory() 자체의 예외 등)가 APScheduler 내부 로거로만
+        # 흘러가 run_id 상관관계가 끊기지 않도록, 주간 잡(_weekly_job)과
+        # 동일하게 구조화 로거로 기록한 뒤 재발생시킨다(record_failure()는
+        # 여기서 다시 호출하지 않는다 — execute_monthly_campaign_run() 내부
+        # 경로가 이미 기록했거나, 이 경로는 그 내부 경로 밖의 예외다).
+        try:
+            execute_monthly_campaign_run(
+                run_id=run_id,
+                data_as_of=data_as_of,
+                config=config,
+                wol_sender=wol_sender,
+                connection_factory=connection_factory,
+                metrics=metrics,
+            )
+        except Exception:
+            logger.error("monthly training run raised run_id=%s", run_id, exc_info=True)
+            raise
 
     scheduler.register_cron_job(
         MONTHLY_OPTUNA_TUNING_JOB_ID, monthly_optuna_tuning_trigger(), _monthly_job

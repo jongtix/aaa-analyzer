@@ -683,6 +683,37 @@ class TestMonthlyOptunaTuningJobCallback:
         with pytest.raises(MonthlyCampaignRunError):
             monthly_callback()
 
+    def test_callback_logs_run_id_and_reraises_on_unexpected_exception(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        """review finding W1: main.py 레벨 방어적 try/except — monthly_dispatch.py의
+        `_fail()`이 커버하지 않는 예상 밖 예외(예: connection_factory() 자체의
+        예외)도 주간 잡(_weekly_job)과 동일하게 run_id 포함 구조화 로그 기록
+        후 재발생해야 한다."""
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+        config = _make_config(tmp_path)
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        def _raise_unexpected(**_kwargs):
+            raise ConnectionError("SSH 소켓 생성 실패 (paramiko)")
+
+        monkeypatch.setattr(main_module, "execute_monthly_campaign_run", _raise_unexpected)
+
+        main_module.wire_monthly_optuna_tuning_job(registry, config=config, metrics=metrics)
+
+        _, kwargs = mock_scheduler.add_job.call_args
+        monthly_callback = kwargs.get("func") or mock_scheduler.add_job.call_args.args[0]
+
+        with caplog.at_level("ERROR"):
+            with pytest.raises(ConnectionError):
+                monthly_callback()
+
+        matching = [r for r in caplog.records if "monthly training run raised" in r.message]
+        assert len(matching) == 1
+        assert "run_id=" in matching[0].message
+        assert matching[0].exc_info is not None
+
 
 class TestRunEntrypointFailFast:
     """AC-ATG-001: 필수 설정 누락 시 컨테이너가 기동에 실패한다(G-1)."""
