@@ -509,6 +509,181 @@ class TestDailyStalenessCheckCallback:
         record_staleness_batch_mock.assert_not_called()
 
 
+class TestWireMonthlyOptunaTuningJobRegistration:
+    """SPEC-ANALYZER-TRAIN-TUNING-001 M7(REQ-ATT-002/003/004): 월간 잡은
+    개별 `register_cron_job()` 호출로 등록되어야 하며, `register_default_jobs()`
+    (GATE-001/STALENESS-001과 동일 원칙 계승)는 호출되어서는 안 된다. 주간+일일+
+    월간을 모두 등록하면 `registered_jobs()`는 정확히
+    `["weekly-full-retrain", "daily-staleness-check", "monthly-optuna-tuning"]`
+    3건이어야 한다(AC-ATT-002)."""
+
+    def test_registers_exactly_weekly_daily_and_monthly_jobs(self, tmp_path: Path):
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+        config = _make_config(tmp_path)
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        main_module.wire_weekly_retrain_job(registry, config=config, metrics=metrics)
+        main_module.wire_daily_staleness_check_job(registry, config=config, metrics=metrics)
+        main_module.wire_monthly_optuna_tuning_job(registry, config=config, metrics=metrics)
+
+        assert registry.registered_jobs() == [
+            WEEKLY_FULL_RETRAIN_JOB_ID,
+            DAILY_STALENESS_CHECK_JOB_ID,
+            MONTHLY_OPTUNA_TUNING_JOB_ID,
+        ]
+
+    def test_does_not_call_register_default_jobs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+        config = _make_config(tmp_path)
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        called = {"invoked": False}
+
+        def _fake_register_default_jobs(*args, **kwargs):
+            called["invoked"] = True
+            return []
+
+        import analyzer.orchestration.scheduler as scheduler_module
+
+        monkeypatch.setattr(scheduler_module, "register_default_jobs", _fake_register_default_jobs)
+
+        main_module.wire_monthly_optuna_tuning_job(registry, config=config, metrics=metrics)
+
+        assert called["invoked"] is False
+
+    def test_does_not_call_scheduler_start(self, tmp_path: Path):
+        """중복 `start()` 방지 — 스케줄러 기동은 `wire_weekly_retrain_job()`이
+        전담한다(주간/일일과 동일 원칙)."""
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+        config = _make_config(tmp_path)
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        main_module.wire_monthly_optuna_tuning_job(registry, config=config, metrics=metrics)
+
+        mock_scheduler.start.assert_not_called()
+
+    def test_add_job_receives_h1_safety_kwargs(self, tmp_path: Path):
+        """AC-ATT-005(REQ-ATT-004): max_instances=1/coalesce/misfire_grace_time이
+        register_cron_job() 경유로 명시 전달되어야 한다."""
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+        config = _make_config(tmp_path)
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        main_module.wire_monthly_optuna_tuning_job(registry, config=config, metrics=metrics)
+
+        _, kwargs = mock_scheduler.add_job.call_args
+        assert kwargs["max_instances"] == 1
+        assert "coalesce" in kwargs
+        assert "misfire_grace_time" in kwargs
+
+
+class TestMonthlyOptunaTuningJobCallback:
+    """REQ-ATT-002/013/014/015: 콜백은 `execute_monthly_campaign_run()`을
+    run_id/data_as_of/config/wol_sender/connection_factory/metrics와 함께
+    호출해야 하며, `execute_scheduled_training_run()`은 호출하지 않는다
+    (REQ-ATT-013 — 캠페인 자신이 활성화를 완결하므로 승격 꼬리를 경유하지
+    않는다)."""
+
+    def test_callback_invokes_execute_monthly_campaign_run_with_expected_kwargs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+        config = _make_config(tmp_path)
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        captured: dict = {}
+
+        def fake_execute_monthly_campaign_run(**kwargs):
+            captured.update(kwargs)
+
+        monkeypatch.setattr(
+            main_module, "execute_monthly_campaign_run", fake_execute_monthly_campaign_run
+        )
+
+        class _FixedDatetime:
+            @staticmethod
+            def now(tz):
+                import datetime as _datetime_module
+
+                return _datetime_module.datetime(2026, 9, 1, 6, 0, tzinfo=tz)
+
+        monkeypatch.setattr(main_module, "datetime", _FixedDatetime)
+
+        main_module.wire_monthly_optuna_tuning_job(registry, config=config, metrics=metrics)
+
+        _, kwargs = mock_scheduler.add_job.call_args
+        monthly_callback = kwargs.get("func") or mock_scheduler.add_job.call_args.args[0]
+        monthly_callback()
+
+        assert captured["data_as_of"] == date(2026, 8, 31)
+        assert captured["config"] is config
+        assert captured["metrics"] is metrics
+        assert captured["wol_sender"] is not None
+        assert captured["connection_factory"] is not None
+        assert "run_id" in captured
+
+    def test_callback_does_not_call_execute_scheduled_training_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+        config = _make_config(tmp_path)
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        monkeypatch.setattr(main_module, "execute_monthly_campaign_run", lambda **_kwargs: None)
+
+        called = {"invoked": False}
+
+        def _fake_execute_scheduled_training_run(*args, **kwargs):
+            called["invoked"] = True
+
+        monkeypatch.setattr(
+            runner_module, "execute_scheduled_training_run", _fake_execute_scheduled_training_run
+        )
+
+        main_module.wire_monthly_optuna_tuning_job(registry, config=config, metrics=metrics)
+
+        _, kwargs = mock_scheduler.add_job.call_args
+        monthly_callback = kwargs.get("func") or mock_scheduler.add_job.call_args.args[0]
+        monthly_callback()
+
+        assert called["invoked"] is False
+
+    def test_callback_propagates_exception_without_swallowing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """REQ-ATT-014: `execute_monthly_campaign_run()`이 이미
+        `metrics.record_failure()` + `MonthlyCampaignRunError` 재발생을
+        수행하므로, 콜백은 이를 그대로 전파해야 한다(예외를 삼켜 성공으로
+        위장하지 않는다)."""
+        mock_scheduler = MagicMock()
+        registry = SchedulerRegistry(scheduler=mock_scheduler)
+        config = _make_config(tmp_path)
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        from analyzer.orchestration.monthly_dispatch import MonthlyCampaignRunError
+
+        def _raise(**_kwargs):
+            raise MonthlyCampaignRunError("월간 캠페인 종료코드 1")
+
+        monkeypatch.setattr(main_module, "execute_monthly_campaign_run", _raise)
+
+        main_module.wire_monthly_optuna_tuning_job(registry, config=config, metrics=metrics)
+
+        _, kwargs = mock_scheduler.add_job.call_args
+        monthly_callback = kwargs.get("func") or mock_scheduler.add_job.call_args.args[0]
+
+        with pytest.raises(MonthlyCampaignRunError):
+            monthly_callback()
+
+
 class TestRunEntrypointFailFast:
     """AC-ATG-001: 필수 설정 누락 시 컨테이너가 기동에 실패한다(G-1)."""
 

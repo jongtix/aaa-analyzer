@@ -110,16 +110,17 @@ def weekly_full_retrain_trigger() -> CronTrigger:
 
 
 def monthly_optuna_tuning_trigger() -> CronTrigger:
-    """REQ-ATA-081: 월간 Optuna 튜닝 — 매월 1일 1회, KST.
+    """REQ-ATA-081/REQ-ATT-003: 월간 Optuna 튜닝 — 매월 1일 1회, KST.
 
-    미장 정규장 마감 이후 안전 여유를 두기 위해 07:00 KST로 고정한다 — 매월 1일
-    02:00 KST는 ET 기준 전일 정오 무렵으로 미장 정규장 마감 훨씬 이전이라
-    부적절하다. `daily_staleness_check_trigger()`(REQ-ATD-006)는 04:00 KST로
-    별도 조정됐으므로(모델 정체 감지는 학습 잡과 독립적인 스케줄, REQ-ATA-083)
-    더 이상 이 잡의 시각 관례 기준이 아니다 — 두 잡은 각자의 마감 이후 안전
-    여유를 독립적으로 산정한다.
+    06:00 KST로 고정한다(REQ-ATT-003, 기존 07:00 KST에서 사용자 확정 변경) —
+    STALENESS-001의 일일 잡(04:00 KST)과 GATE-001의 주간 잡(일요일 01:00 KST,
+    최대 실행창 ~6시간)이 매월 1일이 일요일인 경우에도 겹치지 않는 시각이다
+    (spec.md §4 알려진 한계 1). `daily_staleness_check_trigger()`(REQ-ATD-006)는
+    04:00 KST로 별도 조정됐으므로(모델 정체 감지는 학습 잡과 독립적인 스케줄,
+    REQ-ATA-083) 더 이상 이 잡의 시각 관례 기준이 아니다 — 두 잡은 각자의
+    마감 이후 안전 여유를 독립적으로 산정한다.
     """
-    return CronTrigger(day="1", hour=7, minute=0, timezone=_KST)
+    return CronTrigger(day="1", hour=6, minute=0, timezone=_KST)
 
 
 def daily_staleness_check_trigger() -> CronTrigger:
