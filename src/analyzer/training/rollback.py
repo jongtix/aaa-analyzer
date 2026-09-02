@@ -33,7 +33,7 @@ from analyzer.orchestration.activation import (
     read_activation_manifest,
     rollback_activation_manifest,
 )
-from analyzer.training.persistence import enumerate_model_versions
+from analyzer.training.persistence import _NATIVE_EXTENSION, enumerate_model_versions
 
 
 def _manifest_state(manifest: ActivationManifest) -> tuple[str, str]:
@@ -56,7 +56,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--models-root", type=Path, required=True)
     parser.add_argument("--market", required=True)
     parser.add_argument("--horizon", type=int, required=True)
-    parser.add_argument("--algorithm", required=True)
+    # review finding W3: choices 제약으로 argparse 자체가 오타를 즉시 거부한다
+    # (enumerate_model_versions()가 던지는 raw ValueError 트레이스백이 운영자에게
+    # 노출되기 전에 차단) — 값은 persistence._NATIVE_EXTENSION의 실제 키와
+    # 동일해야 한다(하드코딩 추측 금지).
+    parser.add_argument("--algorithm", required=True, choices=list(_NATIVE_EXTENSION))
     parser.add_argument("--target-trained-date", type=date.fromisoformat, required=True)
     parser.add_argument(
         "--confirm",

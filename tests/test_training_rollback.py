@@ -141,6 +141,38 @@ class TestRollbackTargetNotFound:
         assert "매니페스트" in capsys.readouterr().err
 
 
+class TestRollbackAlgorithmChoicesValidation:
+    """review finding W3: `--algorithm`에 오타(존재하지 않는 값)를 주면
+    argparse 자체가 `choices` 제약으로 즉시 거부해야 한다 —
+    `enumerate_model_versions()`가 던지는 raw `ValueError` 트레이스백이
+    운영자에게 노출되지 않는다."""
+
+    def test_invalid_algorithm_exits_via_argparse_not_raw_valueerror(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ):
+        models_root = tmp_path / "models"
+        argv = [
+            "--models-root",
+            str(models_root),
+            "--market",
+            MARKET,
+            "--horizon",
+            str(HORIZON),
+            "--algorithm",
+            "xgboot",
+            "--target-trained-date",
+            D1.isoformat(),
+            "--confirm",
+        ]
+
+        with pytest.raises(SystemExit) as exc_info:
+            rollback.main(argv)
+
+        assert exc_info.value.code != 0
+        stderr = capsys.readouterr().err
+        assert "xgboot" in stderr
+
+
 class TestRollbackConfirmGate:
     """AC-ATT-021(REQ-ATT-020): `--confirm` 미지정 시 대기 중인 롤백 내용만
     출력하고 매니페스트를 변경하지 않는다."""
