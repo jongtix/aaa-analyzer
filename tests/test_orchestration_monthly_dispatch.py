@@ -11,6 +11,7 @@ from collections.abc import Callable
 from datetime import date, timedelta
 from pathlib import Path
 
+import pytest
 from prometheus_client import CollectorRegistry
 
 from analyzer.orchestration import monthly_dispatch
@@ -192,6 +193,57 @@ class TestExecuteMonthlyCampaignRunSuccess:
             inspect.signature(execute_monthly_campaign_run).parameters["combos"].default
             == POINT_COMBOS
         )
+
+
+class TestExecuteMonthlyCampaignRunRetentionFailure:
+    """review finding W1: 성공 기록(record_success) 이후
+    apply_retention_for_combos()가 예외를 던지면, run_id를 포함한 구조화
+    로그를 기록한 뒤 그대로 재발생해야 한다(metrics.record_failure()는
+    호출하지 않는다 — 캠페인 실행 자체는 성공했으므로, M2/M4 기존 설계
+    전제 유지)."""
+
+    def test_retention_failure_logs_run_id_and_reraises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        config = _make_config(tmp_path)
+        wol = _FakeWolSender([True])
+        connection = _FakeConnection(exec_results=[CommandResult(exit_code=0)])
+        registry = CollectorRegistry()
+        metrics = TrainingMetrics(registry=registry)
+
+        def _raise_retention_failure(*_args, **_kwargs):
+            raise ValueError("아카이브 무결성 검증 실패")
+
+        monkeypatch.setattr(
+            monthly_dispatch, "apply_retention_for_combos", _raise_retention_failure
+        )
+
+        with caplog.at_level("ERROR"):
+            with pytest.raises(ValueError, match="아카이브 무결성 검증 실패"):
+                execute_monthly_campaign_run(
+                    run_id="monthly-run-retention-fail",
+                    data_as_of=date(2026, 9, 1),
+                    config=config,
+                    wol_sender=wol,
+                    connection_factory=lambda: connection,
+                    metrics=metrics,
+                    combos=(("domestic", 5, "lightgbm"),),
+                    sleep_fn=lambda _seconds: None,
+                )
+
+        matching = [r for r in caplog.records if "retention" in r.message]
+        assert len(matching) == 1
+        assert "monthly-run-retention-fail" in matching[0].message
+        assert matching[0].exc_info is not None
+
+        success_value = registry.get_sample_value(
+            TRAINING_RUN_TOTAL_NAME, {"stage": "success", "outcome": "success"}
+        )
+        assert success_value == 1.0
+        failure_value = registry.get_sample_value(
+            TRAINING_RUN_TOTAL_NAME, {"stage": "monthly_tuning", "outcome": "failure"}
+        )
+        assert failure_value is None
 
 
 class TestExecuteMonthlyCampaignRunFailure:
