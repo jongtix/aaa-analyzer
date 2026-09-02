@@ -11,8 +11,16 @@ SPEC-ANALYZER-TRAIN-GATE-001 M5(REQ-ATG-001/002/003/004/005/006): 기동 시
 SPEC-ANALYZER-TRAIN-STALENESS-001 M3(REQ-ATD-005/007/010): 위 주간 배선
 패턴을 참조해 일일 모델 정체 감지 cron 잡을 개별 `register_cron_job()`
 호출로 추가 등록한다(`register_default_jobs()`는 여전히 호출하지 않는다).
+
+SPEC-ANALYZER-TRAIN-TUNING-001 M7(REQ-ATT-002/003/004/013): 위 두 배선
+패턴을 참조해 월간 Optuna 재튜닝 cron 잡을 개별 `register_cron_job()`
+호출로 추가 등록한다(`register_default_jobs()`는 여전히 호출하지 않는다).
 등록 후 `registered_jobs()`는 정확히 `["weekly-full-retrain",
-"daily-staleness-check"]` 2건이어야 한다.
+"daily-staleness-check", "monthly-optuna-tuning"]` 3건이어야 한다. 월간
+콜백은 `execute_scheduled_training_run()`을 경유하지 않고(REQ-ATT-013)
+`monthly_dispatch.execute_monthly_campaign_run()`을 직접 호출한다 — 그
+함수가 성공/실패 기록(REQ-ATT-014/015)을 이미 내부에서 수행하므로 이
+콜백은 예외를 잡지 않고 그대로 전파한다.
 """
 
 import asyncio
@@ -29,15 +37,19 @@ from analyzer.orchestration.consumer import StreamConsumer
 from analyzer.orchestration.gate_adapter import build_gate_promotion_fn, compute_data_as_of
 from analyzer.orchestration.manual_run import run_training
 from analyzer.orchestration.metrics import TrainingMetrics
+from analyzer.orchestration.monthly_dispatch import execute_monthly_campaign_run
 from analyzer.orchestration.scheduler import (
     DAILY_STALENESS_CHECK_JOB_ID,
+    MONTHLY_OPTUNA_TUNING_JOB_ID,
     WEEKLY_FULL_RETRAIN_JOB_ID,
     SchedulerRegistry,
     daily_staleness_check_trigger,
+    monthly_optuna_tuning_trigger,
     weekly_full_retrain_trigger,
 )
 from analyzer.orchestration.ssh_dispatch import ParamikoSshConnection
 from analyzer.orchestration.staleness import detect_stale_models
+from analyzer.orchestration.wol import UdpBroadcastWolSender
 
 logger = get_logger(__name__)
 
@@ -163,6 +175,56 @@ def wire_daily_staleness_check_job(
     )
 
 
+def wire_monthly_optuna_tuning_job(
+    scheduler: SchedulerRegistry,
+    *,
+    config: AutomationConfig,
+    metrics: TrainingMetrics,
+) -> None:
+    """REQ-ATT-002/003/004: 월간 Optuna 재튜닝 cron 잡 하나만 개별
+    `register_cron_job()` 호출로 등록한다 — `register_default_jobs()`(주간/
+    일일 잡 포함)는 호출하지 않는다(GATE-001/STALENESS-001과 동일 원칙 계승).
+
+    스케줄러 기동(`start()`)은 `wire_weekly_retrain_job()`이 이미 수행하므로
+    이 함수는 잡 등록만 담당한다.
+    """
+
+    def _monthly_job() -> None:
+        run_id = new_trace_id()
+        fire_date = datetime.now(_KST).date()
+        # REQ-ATT-002: data_as_of는 발화 시점에 한 곳에서 1회 계산되어
+        # execute_monthly_campaign_run()에 주입된다(주간 잡과 동일 관례).
+        data_as_of = compute_data_as_of(fire_date)
+
+        wol_sender = UdpBroadcastWolSender()
+
+        def connection_factory() -> ParamikoSshConnection:
+            return ParamikoSshConnection(
+                host=config.ssh_host,
+                port=config.ssh_port,
+                username=config.ssh_username,
+                private_key_path=config.ssh_private_key_path,
+                known_hosts_path=config.known_hosts_path,
+            )
+
+        # REQ-ATT-013/014/015: execute_monthly_campaign_run()이 성공/실패
+        # 기록(metrics.record_success/record_failure)을 이미 내부에서
+        # 수행하므로, 이 콜백은 예외를 잡지 않고 그대로 전파한다(이중 기록
+        # 방지 — 일일 잡의 metrics.record_failure 직접 호출 경로와 동일 원칙).
+        execute_monthly_campaign_run(
+            run_id=run_id,
+            data_as_of=data_as_of,
+            config=config,
+            wol_sender=wol_sender,
+            connection_factory=connection_factory,
+            metrics=metrics,
+        )
+
+    scheduler.register_cron_job(
+        MONTHLY_OPTUNA_TUNING_JOB_ID, monthly_optuna_tuning_trigger(), _monthly_job
+    )
+
+
 async def run(host: str = "0.0.0.0", port: int = 8000) -> None:
     """상주 부모 프로세스를 시작한다: FastAPI 앱 + 주간 재학습 cron 잡 배선.
 
@@ -182,6 +244,8 @@ async def run(host: str = "0.0.0.0", port: int = 8000) -> None:
     # REQ-ATD-005: wire_weekly_retrain_job()이 scheduler.start()를 이미
     # 수행했으므로, 일일 잡은 등록만(start() 재호출 없이) 뒤이어 추가한다.
     wire_daily_staleness_check_job(scheduler, config=config, metrics=metrics)
+    # REQ-ATT-002: 월간 잡도 등록만(start() 재호출 없이) 뒤이어 추가한다.
+    wire_monthly_optuna_tuning_job(scheduler, config=config, metrics=metrics)
 
     await consumer.start()
     logger.info(

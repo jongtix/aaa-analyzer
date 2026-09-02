@@ -133,6 +133,17 @@ class TestCronTriggerFactories:
         assert fields["day"] == "1"
         assert str(trigger.timezone) == "Asia/Seoul"
 
+    def test_monthly_optuna_tuning_fires_at_06_00_kst(self):
+        """AC-ATT-004(REQ-ATT-003): 발화 시각이 07:00 KST에서 06:00 KST로
+        변경됐다 — day="1"/minute=0/timezone=Asia/Seoul은 무수정."""
+        trigger = monthly_optuna_tuning_trigger()
+
+        fields = {f.name: str(f) for f in trigger.fields}
+        assert fields["day"] == "1"
+        assert fields["hour"] == "6"
+        assert fields["minute"] == "0"
+        assert str(trigger.timezone) == "Asia/Seoul"
+
     def test_daily_staleness_check_is_daily_kst(self):
         trigger = daily_staleness_check_trigger()
 
