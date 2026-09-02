@@ -443,7 +443,12 @@ class TestRunWalkForwardCampaignAssemblesDatasetOncePerMarket:
 class TestMainCli:
     """M6 Part 0: `main()`은 `run_walk_forward_campaign_and_activate()`를
     호출하도록 배선이 갱신되었다(1차 배포까지 end-to-end 연결) — 신규
-    `--summary-report-path` 인자가 추가되었다."""
+    `--summary-report-path` 인자가 추가되었다.
+
+    M5: `--n-trials` 선택적 인자 신설(REQ-ATT-008) — 미지정 시
+    `run_walk_forward_campaign_and_activate()`의 `optuna_trials` 파라미터는
+    전달되지 않거나 함수 자체 기본값(`CAMPAIGN_OPTUNA_TRIALS`)과 동일해야
+    한다(AC-ATT-009, 하위호환 회귀)."""
 
     def test_main_returns_0_on_success(self, tmp_path: Path):
         with (
@@ -504,6 +509,86 @@ class TestMainCli:
             )
 
         assert exit_code == 1
+
+    def test_ac_att_009_n_trials_omitted_keeps_optuna_trials_at_function_default(
+        self, tmp_path: Path
+    ):
+        """AC-ATT-009: `--n-trials` 미지정 시, `optuna_trials`는 전달되지
+        않거나 함수 자체 기본값(`CAMPAIGN_OPTUNA_TRIALS`)과 동일해야 한다."""
+        mock_activate = MagicMock(
+            return_value=campaign_module.CampaignActivationResult(
+                campaign_result=campaign_module.CampaignResult(success=True)
+            )
+        )
+        with (
+            patch.object(campaign_module, "build_trainer_engine", return_value=MagicMock()),
+            patch.object(
+                campaign_module,
+                "run_walk_forward_campaign_and_activate",
+                mock_activate,
+            ),
+        ):
+            exit_code = main(
+                [
+                    "--cache-dir",
+                    str(tmp_path / "cache"),
+                    "--models-root",
+                    str(tmp_path / "models"),
+                    "--data-as-of",
+                    "2026-08-17",
+                    "--feature-code-version",
+                    "v1",
+                    "--optuna-storage-dir",
+                    str(tmp_path / "optuna"),
+                    "--summary-report-path",
+                    str(tmp_path / "summary.md"),
+                ]
+            )
+
+        assert exit_code == 0
+        _, call_kwargs = mock_activate.call_args
+        assert (
+            "optuna_trials" not in call_kwargs
+            or call_kwargs["optuna_trials"] == CAMPAIGN_OPTUNA_TRIALS
+        )
+
+    def test_ac_att_009_n_trials_specified_is_forwarded_to_optuna_trials(self, tmp_path: Path):
+        """`--n-trials`를 명시하면 그 값이 `optuna_trials`로 전달된다."""
+        mock_activate = MagicMock(
+            return_value=campaign_module.CampaignActivationResult(
+                campaign_result=campaign_module.CampaignResult(success=True)
+            )
+        )
+        with (
+            patch.object(campaign_module, "build_trainer_engine", return_value=MagicMock()),
+            patch.object(
+                campaign_module,
+                "run_walk_forward_campaign_and_activate",
+                mock_activate,
+            ),
+        ):
+            exit_code = main(
+                [
+                    "--cache-dir",
+                    str(tmp_path / "cache"),
+                    "--models-root",
+                    str(tmp_path / "models"),
+                    "--data-as-of",
+                    "2026-08-17",
+                    "--feature-code-version",
+                    "v1",
+                    "--optuna-storage-dir",
+                    str(tmp_path / "optuna"),
+                    "--summary-report-path",
+                    str(tmp_path / "summary.md"),
+                    "--n-trials",
+                    "100",
+                ]
+            )
+
+        assert exit_code == 0
+        _, call_kwargs = mock_activate.call_args
+        assert call_kwargs["optuna_trials"] == 100
 
 
 class TestPart0IntegrationWiring:

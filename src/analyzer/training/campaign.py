@@ -1080,20 +1080,43 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--feature-code-version", required=True)
     parser.add_argument("--optuna-storage-dir", type=Path, required=True)
     parser.add_argument("--summary-report-path", type=Path, required=True)
+    parser.add_argument(
+        "--n-trials",
+        type=int,
+        default=None,
+        help=(
+            "Optuna 튜닝 시행 횟수(선택). 미지정 시 "
+            "run_walk_forward_campaign_and_activate()의 자체 기본값"
+            f"({CAMPAIGN_OPTUNA_TRIALS})을 그대로 사용한다(REQ-ATT-008)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     engine = build_trainer_engine()
 
-    activation_result = run_walk_forward_campaign_and_activate(
-        trainer_engine=engine,
-        calendar_code=args.calendar_code,
-        cache_dir=args.cache_dir,
-        models_root=args.models_root,
-        data_as_of=args.data_as_of,
-        feature_code_version=args.feature_code_version,
-        optuna_storage_dir=args.optuna_storage_dir,
-        summary_report_path=args.summary_report_path,
-    )
+    if args.n_trials is not None:
+        activation_result = run_walk_forward_campaign_and_activate(
+            trainer_engine=engine,
+            calendar_code=args.calendar_code,
+            cache_dir=args.cache_dir,
+            models_root=args.models_root,
+            data_as_of=args.data_as_of,
+            feature_code_version=args.feature_code_version,
+            optuna_storage_dir=args.optuna_storage_dir,
+            summary_report_path=args.summary_report_path,
+            optuna_trials=args.n_trials,
+        )
+    else:
+        activation_result = run_walk_forward_campaign_and_activate(
+            trainer_engine=engine,
+            calendar_code=args.calendar_code,
+            cache_dir=args.cache_dir,
+            models_root=args.models_root,
+            data_as_of=args.data_as_of,
+            feature_code_version=args.feature_code_version,
+            optuna_storage_dir=args.optuna_storage_dir,
+            summary_report_path=args.summary_report_path,
+        )
     if not activation_result.campaign_result.success:
         print(f"캠페인 실패: {activation_result.campaign_result.error}", file=sys.stderr)
         return 1
