@@ -6,6 +6,7 @@ AC-AT-008/AC-AT-009의 worked example을 그대로 구현한다.
 """
 
 import hashlib
+import inspect
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
@@ -15,14 +16,36 @@ import numpy as np
 import pytest
 
 from analyzer.training.persistence import (
+    MONTHLY_ACTIVE_COUNT,
     ModelVersion,
+    apply_retention_for_combos,
     apply_retention_policy,
+    combo_archive_root,
     enumerate_model_versions,
     model_dir,
     model_filename,
     save_model_native,
     verify_model_integrity,
 )
+
+
+def _write_version(
+    models_root: Path,
+    market: str,
+    horizon: int,
+    algorithm: str,
+    trained_date: date,
+    payload: bytes,
+) -> tuple[Path, Path, str]:
+    """실제 학습 없이 파일명 관례에 맞는 모델 파일 + 사이드카 쌍을 기록한다."""
+    target_dir = model_dir(models_root, market, horizon, algorithm)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    model_path = target_dir / model_filename(market, horizon, algorithm, trained_date)
+    model_path.write_bytes(payload)
+    sha256 = hashlib.sha256(payload).hexdigest()
+    sidecar_path = model_path.with_suffix(model_path.suffix + ".sha256")
+    sidecar_path.write_text(sha256, encoding="utf-8")
+    return model_path, sidecar_path, sha256
 
 
 def _trained_lgbm_model() -> lgb.LGBMRegressor:
@@ -190,23 +213,7 @@ class TestEnumerateModelVersions:
     """AC-ATT-017(REQ-ATT-016): `model_dir()` 스캔으로 네이티브 모델 파일 +
     `.sha256` 사이드카 쌍을 `ModelVersion` 시퀀스로 구성한다."""
 
-    @staticmethod
-    def _write_version(
-        models_root: Path,
-        market: str,
-        horizon: int,
-        algorithm: str,
-        trained_date: date,
-        payload: bytes,
-    ) -> tuple[Path, Path, str]:
-        target_dir = model_dir(models_root, market, horizon, algorithm)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        model_path = target_dir / model_filename(market, horizon, algorithm, trained_date)
-        model_path.write_bytes(payload)
-        sha256 = hashlib.sha256(payload).hexdigest()
-        sidecar_path = model_path.with_suffix(model_path.suffix + ".sha256")
-        sidecar_path.write_text(sha256, encoding="utf-8")
-        return model_path, sidecar_path, sha256
+    _write_version = staticmethod(_write_version)
 
     def test_ac_att_017_returns_five_versions_sorted_ascending_with_sidecar_hashes(
         self, tmp_path: Path
@@ -255,3 +262,100 @@ class TestEnumerateModelVersions:
     def test_rejects_unsupported_algorithm(self, tmp_path: Path):
         with pytest.raises(ValueError, match="지원하지 않는 algorithm"):
             enumerate_model_versions(tmp_path, "domestic", 20, "catboost")
+
+
+class TestApplyRetentionForCombos:
+    """AC-ATT-018(REQ-ATT-017): 월간 성공 후처리가 호출할 보존 정책 배선 지점.
+
+    `enumerate_model_versions()`(M1) 결과를 `apply_retention_policy()`에 넘기는
+    조합별 호출 지점으로, `active_count=36`을 명시적으로 전달한다. 함수 자체의
+    기본값 12는 무수정(PRESERVE)이며 여기서 재정의하지 않는다.
+    """
+
+    @staticmethod
+    def _write_n_versions(
+        models_root: Path,
+        market: str,
+        horizon: int,
+        algorithm: str,
+        count: int,
+        start: date = date(2026, 1, 1),
+    ) -> list[date]:
+        dates = [date.fromordinal(start.toordinal() + i) for i in range(count)]
+        for i, trained_date in enumerate(dates):
+            _write_version(
+                models_root, market, horizon, algorithm, trained_date, f"payload-{i}".encode()
+            )
+        return dates
+
+    def test_ac_att_018_forty_versions_leave_exactly_36_active_and_archive_four(
+        self, tmp_path: Path
+    ):
+        combo = ("domestic", 20, "xgboost")
+        dates = self._write_n_versions(tmp_path, *combo, count=40)
+
+        results = apply_retention_for_combos(tmp_path, [combo])
+
+        result = results[combo]
+        assert len(result.active) == 36
+        assert [v.trained_date for v in result.active] == dates[4:]
+        # 오래된 4개는 아카이브로 이동하고 active 경로에서 사라진다.
+        assert enumerate_model_versions(tmp_path, *combo) == result.active
+        assert result.archived_months == ["2026-01"]
+        assert (combo_archive_root(tmp_path, *combo) / "2026-01.tar.zst").exists()
+
+    def test_passes_active_count_36_explicitly_to_apply_retention_policy(self, tmp_path: Path):
+        combo = ("domestic", 20, "xgboost")
+        self._write_n_versions(tmp_path, *combo, count=3)
+
+        with patch(
+            "analyzer.training.persistence.apply_retention_policy",
+            wraps=apply_retention_policy,
+        ) as spy:
+            apply_retention_for_combos(tmp_path, [combo])
+
+        assert spy.call_count == 1
+        assert spy.call_args.kwargs["active_count"] == 36
+        assert MONTHLY_ACTIVE_COUNT == 36
+
+    def test_apply_retention_policy_own_default_active_count_stays_12(self):
+        """PRESERVE: 호출 지점이 36을 넘기더라도 함수 자체 기본값은 12로 유지된다."""
+        assert inspect.signature(apply_retention_policy).parameters["active_count"].default == 12
+
+    def test_archive_root_follows_models_root_archive_combo_convention(self, tmp_path: Path):
+        assert combo_archive_root(tmp_path, "domestic", 20, "xgboost") == (
+            tmp_path / "archive" / "domestic" / "20" / "xgboost"
+        )
+
+    def test_same_month_across_combos_does_not_overwrite_each_other(self, tmp_path: Path):
+        first = ("domestic", 20, "xgboost")
+        second = ("overseas", 20, "xgboost")
+        self._write_n_versions(tmp_path, *first, count=38)
+        self._write_n_versions(tmp_path, *second, count=38)
+
+        results = apply_retention_for_combos(tmp_path, [first, second])
+
+        assert results[first].archived_months == ["2026-01"]
+        assert results[second].archived_months == ["2026-01"]
+        assert (combo_archive_root(tmp_path, *first) / "2026-01.tar.zst").exists()
+        assert (combo_archive_root(tmp_path, *second) / "2026-01.tar.zst").exists()
+        assert combo_archive_root(tmp_path, *first) != combo_archive_root(tmp_path, *second)
+
+    def test_combo_without_versions_yields_empty_result(self, tmp_path: Path):
+        combo = ("overseas", 5, "lightgbm")
+
+        results = apply_retention_for_combos(tmp_path, [combo])
+
+        assert results[combo].active == []
+        assert results[combo].archived_months == []
+
+    def test_integrity_failure_propagates_and_preserves_originals(self, tmp_path: Path):
+        combo = ("domestic", 20, "xgboost")
+        self._write_n_versions(tmp_path, *combo, count=40)
+        before = enumerate_model_versions(tmp_path, *combo)
+
+        with patch("analyzer.training.persistence._verify_archive_integrity", return_value=False):
+            with pytest.raises(ValueError, match="무결성"):
+                apply_retention_for_combos(tmp_path, [combo])
+
+        assert enumerate_model_versions(tmp_path, *combo) == before
