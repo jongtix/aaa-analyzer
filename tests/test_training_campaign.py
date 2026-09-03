@@ -844,4 +844,182 @@ class TestRunWalkForwardCampaignAndActivateEntrypoint:
             assert model_path.exists()
 
         assert result.summary_report_path is not None
-        assert result.summary_report_path.exists()
+
+
+class TestChampionQuantilePersistence:
+    """캠페인 배포 경로(`activate_market_horizon_combo()`)가 챔피언의 포인트
+    모델뿐 아니라 confidence 캘리브레이션용 LightGBM 분위수 보조 모델
+    (alpha=0.10/0.90)도 챔피언과 동일한 `trained_date`로 저장하는지 검증한다
+    — `train.py`(주간 정기 재학습)는 이미 저장하지만 `campaign.py`(월간
+    캠페인 1차 배포)는 저장하지 않아, 라이브 NAS의 캠페인 배포 챔피언
+    3종(2026-08-19) 전부에 대해 동일 `trained_date`의 분위수 보조 모델이
+    존재하지 않는 실측 갭이 있었다."""
+
+    def _persisted_quantile_paths(
+        self, models_root: Path, market: str, horizon: int, trained_date: date
+    ) -> tuple[Path, Path]:
+        q10_name = campaign_module.persistence_module.quantile_model_filename(
+            market, horizon, campaign_module.QUANTILE_ALPHAS[0], trained_date
+        )
+        q90_name = campaign_module.persistence_module.quantile_model_filename(
+            market, horizon, campaign_module.QUANTILE_ALPHAS[1], trained_date
+        )
+        lgbm_dir = campaign_module.persistence_module.model_dir(
+            models_root, market, horizon, "lightgbm"
+        )
+        return lgbm_dir / q10_name, lgbm_dir / q90_name
+
+    def test_champion_xgboost_still_persists_lightgbm_quantile_pair(self, tmp_path: Path):
+        """챔피언이 xgboost 단독이어도 lightgbm 분위수 보조 모델 쌍이
+        챔피언과 동일한 `trained_date`로 저장되어야 한다 — 라이브에서 관측된
+        3종 전부(domestic/60, overseas/20, overseas/60)가 이 케이스다."""
+        panel = _make_synthetic_panel(n_dates=520)
+        n_folds = 52
+        initial_train_end_idx = 200
+        records = _crafted_fold_records(n_folds, lgbm_mean=-0.10, xgb_mean=0.20)
+        frozen_params_by_algorithm = {
+            "lightgbm": {"n_estimators": 5},
+            "xgboost": {"n_estimators": 5},
+        }
+        models_root = tmp_path / "models"
+        trained_date = date(2026, 8, 19)
+
+        outcome = campaign_module.activate_market_horizon_combo(
+            panel=panel,
+            market="domestic",
+            horizon=60,
+            fold_records=records,
+            jsonl_dir=models_root / "domestic" / "60",
+            models_root=models_root,
+            initial_train_end_idx=initial_train_end_idx,
+            n_folds=n_folds,
+            frozen_params_by_algorithm=frozen_params_by_algorithm,
+            trained_date=trained_date,
+        )
+
+        assert outcome.champion_selection.champion_algorithm == "xgboost"
+        assert outcome.persisted_algorithms == ("xgboost",)
+
+        q10_path, q90_path = self._persisted_quantile_paths(
+            models_root, "domestic", 60, trained_date
+        )
+        assert q10_path.exists()
+        assert q90_path.exists()
+        assert q10_path.with_suffix(q10_path.suffix + ".sha256").exists()
+        assert q90_path.with_suffix(q90_path.suffix + ".sha256").exists()
+        assert campaign_module.persistence_module.verify_model_integrity(
+            q10_path, q10_path.with_suffix(q10_path.suffix + ".sha256")
+        )
+        assert campaign_module.persistence_module.verify_model_integrity(
+            q90_path, q90_path.with_suffix(q90_path.suffix + ".sha256")
+        )
+
+    def test_champion_lightgbm_persists_quantile_pair_exactly_once(self, tmp_path: Path):
+        """챔피언이 lightgbm이면(`algorithms_to_persist`가 이미 "lightgbm"을
+        포함) 분위수 보조 모델 쌍이 정확히 1회만 저장되어야 한다 — 조합당
+        1회이지 `algorithms_to_persist` 반복마다가 아니다."""
+        panel = _make_synthetic_panel(n_dates=520)
+        n_folds = 52
+        initial_train_end_idx = 200
+        records = _crafted_fold_records(n_folds, lgbm_mean=0.20, xgb_mean=-0.10)
+        frozen_params_by_algorithm = {
+            "lightgbm": {"n_estimators": 5},
+            "xgboost": {"n_estimators": 5},
+        }
+        models_root = tmp_path / "models"
+        trained_date = date(2026, 8, 17)
+
+        with patch.object(
+            campaign_module,
+            "train_and_persist_champion_quantiles",
+            wraps=campaign_module.train_and_persist_champion_quantiles,
+        ) as quantiles_spy:
+            outcome = campaign_module.activate_market_horizon_combo(
+                panel=panel,
+                market="domestic",
+                horizon=20,
+                fold_records=records,
+                jsonl_dir=models_root / "domestic" / "20",
+                models_root=models_root,
+                initial_train_end_idx=initial_train_end_idx,
+                n_folds=n_folds,
+                frozen_params_by_algorithm=frozen_params_by_algorithm,
+                trained_date=trained_date,
+            )
+
+        assert outcome.champion_selection.champion_algorithm == "lightgbm"
+        assert outcome.persisted_algorithms == ("lightgbm",)
+        quantiles_spy.assert_called_once()
+
+        q10_path, q90_path = self._persisted_quantile_paths(
+            models_root, "domestic", 20, trained_date
+        )
+        assert q10_path.exists()
+        assert q90_path.exists()
+
+    def test_deployment_prohibited_combo_skips_quantile_persistence(self, tmp_path: Path):
+        """배포 자체가 금지된 조합은 분위수 보조 모델도 저장하지 않는다 —
+        REQ-ATE-047 배포 금지 불변식이 분위수 저장에도 동일하게 적용된다."""
+        panel = _make_synthetic_panel(n_dates=260, n_stocks=2)
+        frozen_params_by_algorithm = {
+            "lightgbm": {"n_estimators": 5},
+            "xgboost": {"n_estimators": 5},
+        }
+        records = run_campaign_for_market_horizon(
+            panel,
+            market="domestic",
+            horizon=20,
+            initial_train_end_idx=150,
+            n_folds=3,
+            frozen_params_by_algorithm=frozen_params_by_algorithm,
+        )
+        models_root = tmp_path / "models"
+
+        outcome = campaign_module.activate_market_horizon_combo(
+            panel=panel,
+            market="domestic",
+            horizon=20,
+            fold_records=records,
+            jsonl_dir=models_root / "domestic" / "20",
+            models_root=models_root,
+            initial_train_end_idx=150,
+            n_folds=3,
+            frozen_params_by_algorithm=frozen_params_by_algorithm,
+            trained_date=date(2026, 8, 17),
+        )
+
+        assert outcome.champion_selection.deployment_prohibited is True
+        assert not (models_root / "domestic" / "20" / "lightgbm").exists()
+
+
+class TestTrainAndPersistChampionQuantiles:
+    """`train_and_persist_champion_quantiles()` 단위 동작 — 최종 폴드 학습
+    구간을 재사용해 alpha=0.10/0.90 LightGBM 분위수 모델을 학습·저장한다."""
+
+    def test_persists_two_models_with_matching_trained_date_and_alpha_filenames(
+        self, tmp_path: Path
+    ):
+        panel = _make_synthetic_panel(n_dates=520)
+        models_root = tmp_path / "models"
+        trained_date = date(2026, 8, 19)
+
+        q10_saved, q90_saved = campaign_module.train_and_persist_champion_quantiles(
+            panel,
+            "domestic",
+            20,
+            initial_train_end_idx=200,
+            n_folds=52,
+            frozen_lgbm_params={"n_estimators": 5},
+            models_root=models_root,
+            trained_date=trained_date,
+        )
+
+        assert q10_saved.model_path.exists()
+        assert q90_saved.model_path.exists()
+        assert q10_saved.model_path.name.endswith("_q10.txt")
+        assert q90_saved.model_path.name.endswith("_q90.txt")
+        assert q10_saved.model_path.parent == q90_saved.model_path.parent
+        assert (
+            campaign_module.persistence_module.model_dir(models_root, "domestic", 20, "lightgbm")
+            == q10_saved.model_path.parent
+        )

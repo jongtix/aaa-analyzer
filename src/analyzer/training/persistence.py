@@ -20,7 +20,9 @@ REQ-AT-093/094/095: 동일 (시장, horizon, algorithm) 조합 내 최근 12개
 import hashlib
 import io
 import json
+import shutil
 import tarfile
+import tempfile
 from collections.abc import Sequence
 from compression import zstd
 from dataclasses import dataclass
@@ -125,6 +127,53 @@ def save_model_native(
         raise ValueError(f"{model_path} 저장 직후 SHA-256 라운드트립 검증 실패")
 
     return SavedModel(model_path=model_path, sidecar_path=sidecar_path, sha256=sha256)
+
+
+def quantile_model_filename(market: str, horizon: int, alpha: float, trained_date: date) -> str:
+    """분위수 보조 모델의 파일명 — 포인트 LightGBM 모델과 동일한 algorithm
+    세그먼트("lightgbm")·디렉토리를 공유하되, 파일명 세그먼트에 alpha 구분자를
+    추가해 충돌을 피한다(REQ-ATE-007/008/010).
+
+    `model_filename()`은 algorithm을 {"lightgbm","xgboost"} 두 키로만
+    검증하므로, 여기서는 그 함수가 만드는 포인트 모델용 이름을 그대로 얻은 뒤
+    alpha 태그만 사후 삽입한다 — 확장자는 변경하지 않는다.
+
+    `training/train.py`(주간 정기 재학습)와 `training/campaign.py`(월간
+    캠페인 챔피언 배포)가 공유하는 헬퍼다 — 두 곳에 각자 구현하면 파일명
+    관례가 서서히 갈라질 위험이 있어 이 모듈로 일원화했다.
+    """
+    base = model_filename(market, horizon, "lightgbm", trained_date)
+    stem, _, ext = base.rpartition(".")
+    alpha_tag = f"q{round(alpha * 100):02d}"
+    return f"{stem}_{alpha_tag}.{ext}"
+
+
+def save_quantile_model(
+    model: lgb.LGBMRegressor,
+    models_root: Path,
+    market: str,
+    horizon: int,
+    alpha: float,
+    trained_date: date,
+) -> SavedModel:
+    """분위수 보조 모델을 저장한다 — `save_model_native()`(algorithm="lightgbm")를
+    임시 스테이징 디렉토리에서 호출해 SHA-256 라운드트립 검증(REQ-AT-092)을 그대로
+    재사용한 뒤, 포인트 모델의 실경로를 절대 건드리지 않고 alpha 접미사가 붙은
+    최종 파일명으로 옮긴다(REQ-ATE-007/008/009/010, AC-ATE-003).
+
+    `training/train.py`(주간 정기 재학습)와 `training/campaign.py`(월간
+    캠페인 챔피언 배포)가 공유하는 헬퍼다(위 함수와 동일한 일원화 취지).
+    """
+    models_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=models_root) as staging:
+        staged = save_model_native(model, Path(staging), market, horizon, "lightgbm", trained_date)
+        final_dir = model_dir(models_root, market, horizon, "lightgbm")
+        final_dir.mkdir(parents=True, exist_ok=True)
+        final_path = final_dir / quantile_model_filename(market, horizon, alpha, trained_date)
+        final_sidecar = final_path.with_suffix(final_path.suffix + ".sha256")
+        shutil.move(str(staged.model_path), str(final_path))
+        shutil.move(str(staged.sidecar_path), str(final_sidecar))
+        return SavedModel(model_path=final_path, sidecar_path=final_sidecar, sha256=staged.sha256)
 
 
 def verify_model_integrity(model_path: Path, sidecar_path: Path) -> bool:

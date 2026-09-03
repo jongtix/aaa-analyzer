@@ -751,6 +751,68 @@ def train_and_persist_champion_artifact(
     return saved, feature_columns, len(x_train)
 
 
+def train_and_persist_champion_quantiles(
+    panel: pd.DataFrame,
+    market: str,
+    horizon: int,
+    initial_train_end_idx: int,
+    n_folds: int,
+    frozen_lgbm_params: Mapping[str, Any],
+    models_root: Path,
+    trained_date: date,
+    val_size: int = CAMPAIGN_VAL_SIZE_TRADING_DAYS,
+    trade_dates: pd.DatetimeIndex | None = None,
+) -> tuple[persistence_module.SavedModel, persistence_module.SavedModel]:
+    """2026-09 결함 수정: confidence 캘리브레이션용 LightGBM 분위수 보조
+    모델(alpha=0.10/0.90)을 챔피언 포인트 모델과 **동일한** 마지막 폴드 학습
+    구간(`_final_fold_train_window()`)으로 재학습해 챔피언과 동일한
+    `trained_date`로 저장한다.
+
+    `train.py`(주간 정기 재학습)는 이미 이 쌍을 저장하지만
+    `train_and_persist_champion_artifact()`(캠페인 1차 배포 경로)는 포인트
+    모델만 저장했다 — 그 결과 캠페인이 배포한 챔피언(예: domestic/60 등
+    xgboost 단독 챔피언)은 동일 `trained_date`의 분위수 보조 모델이 전혀
+    존재하지 않았다(향후 SPEC-ANALYZER-INFER-001의 confidence 계산이 점
+    모델과 다른 데이터 윈도우로 학습된 분위수 모델을 섞어 쓰게 되는 갭).
+
+    LightGBM 분위수 모델은 (시장,horizon) 단위이지 챔피언 알고리즘 단위가
+    아니므로, 이 함수는 `algorithms_to_persist`(1개 또는 2개)와 무관하게
+    조합당 정확히 1회만 호출된다(호출부: `activate_market_horizon_combo()`).
+    """
+    train_df = _final_fold_train_window(
+        panel, horizon, initial_train_end_idx, n_folds, val_size, trade_dates=trade_dates
+    )
+    _, x_train, y_train = train_module._split_features_and_labels(train_df, horizon)
+    x_train_arr, y_train_arr = x_train.to_numpy(), y_train.to_numpy()
+
+    q10_model = lgb.LGBMRegressor(
+        **{
+            **_DEFAULT_LGBM_VERBOSITY,
+            **dict(frozen_lgbm_params),
+            "objective": "quantile",
+            "alpha": QUANTILE_ALPHAS[0],
+        }
+    )
+    q90_model = lgb.LGBMRegressor(
+        **{
+            **_DEFAULT_LGBM_VERBOSITY,
+            **dict(frozen_lgbm_params),
+            "objective": "quantile",
+            "alpha": QUANTILE_ALPHAS[1],
+        }
+    )
+    q10_model.fit(x_train_arr, y_train_arr)
+    q90_model.fit(x_train_arr, y_train_arr)
+
+    q10_saved = persistence_module.save_quantile_model(
+        q10_model, models_root, market, horizon, QUANTILE_ALPHAS[0], trained_date
+    )
+    q90_saved = persistence_module.save_quantile_model(
+        q90_model, models_root, market, horizon, QUANTILE_ALPHAS[1], trained_date
+    )
+    return q10_saved, q90_saved
+
+
 @dataclass(frozen=True, slots=True)
 class ComboActivationOutcome:
     """M6 Part 0: (시장,horizon) 조합 1개의 안정화 판정 + 챔피언 선정 +
@@ -879,6 +941,22 @@ def activate_market_horizon_combo(
             },
         )
         persisted.append(algorithm)
+
+    # 2026-09 결함 수정: 챔피언 알고리즘과 무관하게 (시장,horizon) 조합당
+    # 정확히 1회 LightGBM 분위수 보조 모델 쌍을 챔피언과 동일한
+    # trained_date로 저장한다(위 for 루프 내부가 아니라 여기서 1회만 호출).
+    train_and_persist_champion_quantiles(
+        panel,
+        market,
+        horizon,
+        initial_train_end_idx,
+        n_folds,
+        frozen_params_by_algorithm["lightgbm"],
+        models_root,
+        trained_date,
+        val_size=val_size,
+        trade_dates=trade_dates,
+    )
 
     activation_module.write_strategy_manifest(
         models_root,

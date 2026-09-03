@@ -24,7 +24,9 @@ from analyzer.training.persistence import (
     enumerate_model_versions,
     model_dir,
     model_filename,
+    quantile_model_filename,
     save_model_native,
+    save_quantile_model,
     verify_model_integrity,
 )
 
@@ -359,3 +361,41 @@ class TestApplyRetentionForCombos:
                 apply_retention_for_combos(tmp_path, [combo])
 
         assert enumerate_model_versions(tmp_path, *combo) == before
+
+
+class TestQuantileModelFilenameAndSave:
+    """`train.py`의 사설(private) 헬퍼에서 이 모듈로 이전된 공유 헬퍼
+    (`quantile_model_filename()`/`save_quantile_model()`) 회귀 안전성 —
+    이전 전 `train.py` 사설 버전과 파일명/저장 동작이 byte-identical해야
+    한다(주간 정기 재학습 경로 동작 불변, `test_training_train.py`
+    `TestQuantileModelFilenameCollision`이 이미 검증하는 파일명 관례와
+    동일한 기댓값을 여기서도 독립적으로 재확인한다)."""
+
+    def test_filename_matches_point_model_stem_plus_alpha_tag(self):
+        trained_date = date(2026, 8, 17)
+        assert (
+            quantile_model_filename("domestic", 20, 0.10, trained_date)
+            == "domestic_20_lightgbm_2026-08-17_q10.txt"
+        )
+        assert (
+            quantile_model_filename("domestic", 20, 0.90, trained_date)
+            == "domestic_20_lightgbm_2026-08-17_q90.txt"
+        )
+
+    def test_save_quantile_model_round_trips_and_shares_dir_with_point_model(self, tmp_path: Path):
+        market, horizon = "overseas", 60
+        trained_date = date(2026, 8, 19)
+        model = _trained_lgbm_model()
+
+        saved = save_quantile_model(model, tmp_path, market, horizon, 0.10, trained_date)
+
+        assert saved.model_path.exists()
+        assert saved.sidecar_path.exists()
+        assert verify_model_integrity(saved.model_path, saved.sidecar_path)
+        assert saved.model_path.parent == model_dir(tmp_path, market, horizon, "lightgbm")
+        assert saved.model_path.name == "overseas_60_lightgbm_2026-08-19_q10.txt"
+        # 스테이징 임시 디렉토리가 최종 트리에 잔존하지 않아야 한다.
+        assert set((tmp_path / market / str(horizon) / "lightgbm").iterdir()) == {
+            saved.model_path,
+            saved.sidecar_path,
+        }
