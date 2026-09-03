@@ -33,6 +33,7 @@ from datetime import date
 from analyzer.common.logging import get_logger
 from analyzer.common.trace import reset_trace_id, set_trace_id
 from analyzer.orchestration.config import AutomationConfig
+from analyzer.orchestration.log_retention import sweep_trainer_logs
 from analyzer.orchestration.metrics import TrainingMetrics
 from analyzer.orchestration.ssh_dispatch import (
     SshConnection,
@@ -183,6 +184,9 @@ def execute_monthly_campaign_run(
                 )
                 raise
         finally:
+            # SPEC-OBSV-LOGS-003 REQ-002/006: 주간 학습 경로(runner.py)와
+            # 동일한 단일 sweep 함수를 디스패치 완료 직후 호출한다.
+            sweep_trainer_logs(current_run_id=run_id)
             connection.close()
     finally:
         reset_trace_id(trace_id_token)

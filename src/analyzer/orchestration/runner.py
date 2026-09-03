@@ -29,6 +29,7 @@ from analyzer.common.logging import get_logger
 from analyzer.common.trace import reset_trace_id, set_trace_id
 from analyzer.orchestration.config import AutomationConfig
 from analyzer.orchestration.failure import TrainingRunFailure, handle_training_run_failure
+from analyzer.orchestration.log_retention import sweep_trainer_logs
 from analyzer.orchestration.metrics import TrainingMetrics
 from analyzer.orchestration.promotion_gate import PromotionVerdict
 from analyzer.orchestration.ssh_dispatch import (
@@ -279,6 +280,10 @@ def execute_scheduled_training_run(
             return RunOutcome(success=True, promoted=promoted)
 
         finally:
+            # SPEC-OBSV-LOGS-003 REQ-002/006: 디스패치 완료 직후(성공·실패·
+            # 타임아웃 무관) 트레이너 로그 보존 sweep. 방금 tee로 기록된
+            # 현재 run_id 파일은 명시 전달해 삭제 대상에서 제외한다.
+            sweep_trainer_logs(current_run_id=run_id)
             # REQ-ATA-032/AC-ATA-006: 성공·실패·타임아웃 무관 SSH 세션을 정리한다.
             # db_tunnel 자체의 해제는 원격 셸 스크립트의 trap이 담당한다
             # (ssh_dispatch.build_remote_dispatch_command).
