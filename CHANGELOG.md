@@ -5,6 +5,16 @@
 
 ### ✨
 
+- 로그 디렉토리 무한 증가 방지 — 트레이너 로그 보존 sweep + 로그 총량 상한 패리티 문서화 (SPEC-OBSV-LOGS-003 M1-M3, REQ-001~010)
+  - `orchestration/log_retention.py` 신설 — `trainer_{run_id}.log` 파일군에 개수 기반 보존 정책 적용(기본 최신 10개 유지, mtime 내림차순). 라이브 NAS 실측상 `/var/log/aaa-analyzer`가 74MB까지 증가해 있었고 그중 `trainer_*.log` 2개가 각 38MB·18일 이상 방치 상태였다 — 셸 `tee`로 기록되는 파일이라 Python `logging` 회전 대상이 아니었고 어디에도 정리 로직이 없었다(REQ-001/003)
+  - sweep의 glob 대상은 `TRAIN_AUTOMATION_TRAINER_LOG_BASE_DIR`가 **아니라** analyzer 컨테이너 자신의 로컬 로그 디렉토리(`LOG_PATH`, 기본값 `/var/log/aaa-analyzer`) — 전자는 맥북 SMB 마운트 경로 문자열이며 원격 SSH 명령 문자열 구성에만 쓰인다. 컨테이너 내부에서 그 값을 그대로 `Path().glob()`했다면 존재하지 않는 macOS 경로를 대상으로 빈 이터레이터를 반환해 프로덕션에서만 조용히 무동작했을 결함(plan-audit iteration 1 D1에서 정정)
+  - 현재 진행 중인 run의 `trainer_{run_id}.log`는 가장 오래되어도 삭제 대상에서 제외되며 보존 정원도 잠식하지 않는다. 비-트레이너 파일(`aaa-analyzer.log*`)은 glob 패턴 불일치로 자연 제외(REQ-003/004)
+  - 삭제 실패는 파일 단위로 건너뛰고 로그만 남긴다 — dispatch 실패로 전파되지 않는다(REQ-005, SPEC-OBSV-LOGS-002 fail-open 원칙 계승)
+  - sweep 호출은 `runner.py`/`monthly_dispatch.py`의 디스패치 완료 경로(`finally`)에 배선 — 두 호출부가 동일 함수를 재사용한다(REQ-002/006). `ssh_dispatch.py`의 두 빌더 함수는 원격 셸 명령 **문자열만 조립**하고 디스패치를 실행하지 않으므로 배선 지점이 될 수 없었다(계획 대비 문서화된 편차, 근거는 progress.md §E.2)
+  - 신규 환경변수 `TRAIN_AUTOMATION_TRAINER_LOG_RETENTION_COUNT`(`.env.example` 문서화) — 미설정 시 기본값 10, 비정수·음수는 경고 로그 후 기본값으로 대체
+  - `common/logging.py` docstring에 collector/notifier `total-size-cap` 대비 패리티 판단 기록(REQ-007/008) — `RotatingFileHandler(maxBytes=10 MiB, backupCount=5)`의 결정론적 상한(≈60 MiB)이 **디스크 사용량 무한 증가 방지라는 의도 하나에 대해서만** 동등하며, logback `max-history: 30`이 확보하는 사고 조사용 30일 보존 창과의 동등성은 함의하지 않는다는 범위 한정 + 보존 기간 정성적 추정(단일 시점 스냅샷 한계 명시) + 재검토 조건을 병기. 회전 상수 자체는 SPEC-OBSV-LOGS-002 확정값에서 무변경(순수 docstring 추가)
+  - ADR-011이 "Phase 2에서 별도 ADR로 결정한다"고 남긴 미이행 문구를 aaa-infra 측 ADR-035 신설로 이행(별도 레포 변경)
+  - 검증은 단위 테스트 수준(`LOG_PATH`를 임시 디렉토리로 오버라이드) — NAS 컨테이너 실배포 후 실제 `trainer_*.log` 삭제 관측은 미수행
 - 월간 Optuna 재튜닝 cron 활성화 (SPEC-ANALYZER-TRAIN-TUNING-001 M1-M9, REQ-ATT-*)
   - `monthly-optuna-tuning` cron 잡 신규 등록(매월 1일 06:00 KST) — `SchedulerRegistry.registered_jobs()`가 이제 `weekly-full-retrain`/`daily-staleness-check`/`monthly-optuna-tuning` 정확히 3건을 반환한다. `register_default_jobs()` 호출은 0건, `register_cron_job()` 개별 호출 3회로 전환(REQ-ATT-002/003/004)
   - 원격 실행 벡터는 기존 주간 학습 스크립트(`analyzer.training.train`)가 아닌 캠페인 CLI(`python -m analyzer.training.campaign`)를 재사용 — `ssh_dispatch.build_remote_dispatch_command()`에서 골격을 추출해 신규 캠페인 디스패치 함수를 파생시켰다(바이트 동일성 회귀 테스트로 기존 주간 경로 무변경 확인, REQ-ATT-005/006/007)
