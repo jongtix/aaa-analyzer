@@ -272,3 +272,26 @@ class TestFileSinkFailOpen:
 
         # Act & Assert — 예외가 전파되지 않아야 fail-open이 성립한다.
         logger.info("this should not raise even though the file stream is broken")
+
+
+class TestTotalSizeCapParityDocumentation:
+    """AC-007(SPEC-OBSV-LOGS-003 REQ-007/008): DP-2 판단 근거 3요소가 모듈
+    docstring에 모두 기록되어 있어야 한다 — ADR-011이 남긴 Phase 2 공백 해소."""
+
+    def test_docstring_states_deterministic_total_cap(self):
+        assert "60 MiB" in logging_module.__doc__
+
+    def test_docstring_limits_equivalence_claim_scope(self):
+        doc = logging_module.__doc__
+        assert "디스크 사용량이 무한정" in doc
+        assert "함의하지 않는다" in doc
+        assert "max-history: 30" in doc
+
+    def test_docstring_states_retention_duration_estimate_and_review_trigger(self):
+        doc = logging_module.__doc__
+        assert "81KB" in doc
+        assert "정밀 산정되지 않았다" in doc
+        assert "재검토 조건" in doc
+
+    def test_docstring_carries_fail_open_forward_commitment(self):
+        assert "fail-open" in logging_module.__doc__
