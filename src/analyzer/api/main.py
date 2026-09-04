@@ -24,6 +24,7 @@ SPEC-ANALYZER-TRAIN-TUNING-001 M7(REQ-ATT-002/003/004/013): 위 두 배선
 """
 
 import asyncio
+import contextlib
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -32,6 +33,7 @@ import uvicorn
 from analyzer.api.app import create_app
 from analyzer.common.logging import get_logger
 from analyzer.common.trace import new_trace_id
+from analyzer.inference.config import get_inference_config
 from analyzer.orchestration.config import AutomationConfig, get_automation_config
 from analyzer.orchestration.consumer import StreamConsumer
 from analyzer.orchestration.gate_adapter import build_gate_promotion_fn, compute_data_as_of
@@ -236,14 +238,18 @@ def wire_monthly_optuna_tuning_job(
 
 
 async def run(host: str = "0.0.0.0", port: int = 8000) -> None:
-    """상주 부모 프로세스를 시작한다: FastAPI 앱 + 주간 재학습 cron 잡 배선.
+    """상주 부모 프로세스를 시작한다: FastAPI 앱 + cron 잡 + 스트림 컨슈머 배선.
 
     REQ-ATG-002(G-1): `get_automation_config()` 호출은 이 함수 진입 직후
     수행되며, `MissingConfigError`를 잡지 않는다 — 예외가 전파되어 컨테이너
     기동 자체가 실패해야 한다(CD의 `docker compose up -d --wait` + 자동
     롤백이 배포 시점에 설정 결함을 표면화한다).
+
+    SPEC-ANALYZER-INFER-001 M1(REQ-AIF-020): `get_inference_config()`도 동일한
+    fail-fast 관례를 따른다 — Redis 접속 정보가 없으면 기동이 실패한다. 반면
+    Redis **연결** 실패는 컨슈머 루프의 재시도 경로가 흡수한다(일시적 두절이
+    상주 프로세스를 죽이지 않는다).
     """
-    consumer = StreamConsumer()
     config = get_automation_config()
     # REQ-ATG-004: TrainingMetrics는 프로세스당 정확히 1회 생성되어 콜백
     # 클로저에 주입된다 — 콜백 내부에서 발화 시마다 재생성하지 않는다.
@@ -257,9 +263,13 @@ async def run(host: str = "0.0.0.0", port: int = 8000) -> None:
     # REQ-ATT-002: 월간 잡도 등록만(start() 재호출 없이) 뒤이어 추가한다.
     wire_monthly_optuna_tuning_job(scheduler, config=config, metrics=metrics)
 
-    await consumer.start()
+    # REQ-AIF-020: 컨슈머는 무한 폴링 루프이므로 await로 붙잡지 않고 백그라운드
+    # asyncio 태스크로 기동한다 — 같은 이벤트 루프에서 uvicorn과 공존한다.
+    consumer = StreamConsumer(config=get_inference_config())
+    consumer_task = asyncio.create_task(consumer.start())
+
     logger.info(
-        "orchestration wired (jobs=%d)",
+        "orchestration wired (jobs=%d, stream consumer started)",
         len(scheduler.registered_jobs()),
     )
 
@@ -269,6 +279,12 @@ async def run(host: str = "0.0.0.0", port: int = 8000) -> None:
     try:
         await server.serve()
     finally:
+        # REQ-AIF-020: 컨슈머 태스크를 명시적으로 취소하고 종료를 기다린다 —
+        # 취소를 기다리지 않으면 이벤트 루프가 닫히면서 "Task was destroyed but
+        # it is pending" 경고와 함께 미확인 메시지 정리가 누락된다.
+        consumer_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await consumer_task
         # REQ-ATG-001: 프로세스 종료 경로에 shutdown() 훅을 추가한다 —
         # 기존에는 종료 지점이 없었다.
         scheduler.shutdown()

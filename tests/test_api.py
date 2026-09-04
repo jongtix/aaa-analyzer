@@ -1,9 +1,13 @@
 """FastAPI 부모 프로세스 골격에 대한 명세 테스트.
 
-REQ-ANALYZER-FOUNDATION-007/008/009/010: 상주 부모 프로세스는 단일 asyncio
+REQ-ANALYZER-FOUNDATION-007/008/009: 상주 부모 프로세스는 단일 asyncio
 FastAPI 앱을 호스팅한다; GET /health는 헬스 페이로드를 반환한다; GET /metrics는
-prometheus_client exposition 포맷 메트릭을 반환한다; orchestration/은 스트림
-컨슈머와 스케줄러에 대해 구조적 자리 표시자(구독/잡 로직 없음)만 제공한다.
+prometheus_client exposition 포맷 메트릭을 반환한다.
+
+SPEC-ANALYZER-INFER-001 M1: FOUNDATION-001의 `StreamConsumer` 자리 표시자
+검증은 실제 구독 배선 검증으로 대체됐다 — `run()`은 컨슈머를 백그라운드
+asyncio 태스크로 기동하고 종료 경로에서 취소한다(컨슈머 자체의 동작은
+`tests/test_orchestration_consumer.py` 소관).
 """
 
 import asyncio
@@ -12,7 +16,6 @@ from prometheus_client import CONTENT_TYPE_LATEST
 from starlette.testclient import TestClient
 
 from analyzer.api.app import create_app
-from analyzer.orchestration.consumer import StreamConsumer
 from analyzer.orchestration.scheduler import SchedulerRegistry
 
 
@@ -43,16 +46,21 @@ class TestMetricsEndpoint:
 
 
 class TestMainEntrypoint:
-    def test_run_wires_placeholders_then_serves(self, monkeypatch, tmp_path):
-        """SPEC-ANALYZER-TRAIN-GATE-001 M5: run()은 이제 기동 시 주간 재학습
-        cron 잡을 배선한다(G-1 fail-fast 포함) — 이 테스트는 설정 로딩과
-        스케줄러 기동을 모킹해 uvicorn.serve() 호출까지 도달함을 확인한다."""
+    def test_run_wires_jobs_and_consumer_then_serves(self, monkeypatch, tmp_path):
+        """SPEC-ANALYZER-TRAIN-GATE-001 M5 + INFER-001 M1: run()은 기동 시 주간
+        재학습 cron 잡을 배선하고(G-1 fail-fast 포함) 스트림 컨슈머를 백그라운드
+        태스크로 기동한 뒤 uvicorn.serve()에 도달한다. 종료 경로에서는 컨슈머
+        태스크가 취소되고 스케줄러가 shutdown된다."""
         from analyzer.api import main
+        from analyzer.inference.config import InferenceConfig
         from analyzer.orchestration.config import AutomationConfig
 
         served = {"called": False}
 
         async def fake_serve(self):
+            # 실제 uvicorn serve()는 I/O를 await하므로 다른 태스크가 스케줄된다 —
+            # 컨슈머 태스크가 최소 1회 실행되도록 제어권을 넘긴다.
+            await asyncio.sleep(0)
             served["called"] = True
 
         monkeypatch.setattr("uvicorn.Server.serve", fake_serve)
@@ -95,8 +103,31 @@ class TestMainEntrypoint:
         from analyzer.orchestration.metrics import TrainingMetrics
 
         shutdown_calls: list[bool] = []
+        consumer_events: list[str] = []
+
+        class _FakeConsumer:
+            def __init__(self, **kwargs):
+                consumer_events.append("constructed")
+
+            async def start(self) -> None:
+                consumer_events.append("started")
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    consumer_events.append("cancelled")
+                    raise
+
+        fake_inference_config = InferenceConfig(
+            redis_host="redis",
+            redis_port=6379,
+            redis_username="appuser",
+            redis_password="redis-secret",
+            stream_claim_idle_seconds=600,
+        )
 
         monkeypatch.setattr(main, "get_automation_config", lambda: fake_config)
+        monkeypatch.setattr(main, "get_inference_config", lambda: fake_inference_config)
+        monkeypatch.setattr(main, "StreamConsumer", _FakeConsumer)
         monkeypatch.setattr(
             main, "TrainingMetrics", lambda: TrainingMetrics(registry=CollectorRegistry())
         )
@@ -110,18 +141,11 @@ class TestMainEntrypoint:
         assert served["called"] is True
         # REQ-ATG-001: 프로세스 종료 경로에서 shutdown() 훅이 호출되어야 한다.
         assert shutdown_calls == [True]
+        # REQ-AIF-020: 컨슈머는 백그라운드 태스크로 기동되고 종료 경로에서 취소된다.
+        assert consumer_events == ["constructed", "started", "cancelled"]
 
 
 class TestOrchestrationPlaceholders:
-    def test_stream_consumer_start_is_a_no_op_placeholder(self):
-        consumer = StreamConsumer()
-
-        # 아직 구독/소비 로직은 없다(INFER-001 범위) —
-        # start() 호출은 예외 없이 즉시 완료되어야 한다.
-        result = asyncio.run(consumer.start())
-
-        assert result is None
-
     def test_scheduler_registry_starts_with_no_registered_jobs(self):
         registry = SchedulerRegistry()
 
