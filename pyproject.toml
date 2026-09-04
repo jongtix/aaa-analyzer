@@ -20,6 +20,7 @@ dependencies = [
   "optuna>=4.9.0",
   "scipy>=1.18.0",
   "paramiko>=5.0.0",
+  "redis>=6.0.0",
 ]
 
 [dependency-groups]
