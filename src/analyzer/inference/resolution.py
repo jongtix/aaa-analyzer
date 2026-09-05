@@ -11,16 +11,19 @@ AC-AIF-004) — `gate.py`는 무수정이며 이 모듈은 그것을 임포트�
 무수정 재사용한다(PRESERVE) — 매니페스트/모델 파일에 대해 읽기 전용
 소비자로만 동작하며 어떤 쓰기 로직도 갖지 않는다.
 
-범위 경계: 분위수 모델 해석(`resolve_latest_quantile_manifest()`,
-REQ-AIF-050)과 confidence 가드(REQ-AIF-051)는 M3 소관이다 — 이 모듈은
-포인트 모델(lightgbm/xgboost) 대상 해석과 G3 score 컬럼 정책
-(REQ-AIF-040/041)까지만 다룬다.
+이 모듈은 분위수(p10/p90) 모델 해석(`resolve_latest_quantile_manifest()`,
+REQ-AIF-050, M3)도 함께 다룬다 — 챔피언 포인트 모델의 `trained_date`와
+무관하게 독립적으로 최신 분위수 모델 쌍을 선택한다. confidence 가드
+(REQ-AIF-051, `compute_confidence()` 호출부의 ValueError 흡수)는
+`inference/scoring.py`(별도 모듈)의 소관이다 — 이 모듈은 매니페스트/모델
+파일 해석까지만 다룬다.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import date
 from enum import StrEnum
 from pathlib import Path
 
@@ -30,20 +33,33 @@ from analyzer.orchestration.activation import (
     read_strategy_manifest,
 )
 from analyzer.training.ensemble import compute_ensemble_score
-from analyzer.training.persistence import model_dir, model_filename, verify_model_integrity
+from analyzer.training.persistence import (
+    model_dir,
+    model_filename,
+    quantile_model_filename,
+    verify_model_integrity,
+)
 
 _POINT_ALGORITHMS: tuple[str, ...] = ("lightgbm", "xgboost")
+_QUANTILE_ALPHA_TAGS: Mapping[float, str] = {0.1: "q10", 0.9: "q90"}
 
 
 class SkipReason(StrEnum):
-    """REQ-AIF-130 스킵 사유 레이블 중 이 모듈이 산출하는 두 가지.
+    """REQ-AIF-130 스킵 사유 레이블 중 이 모듈(M2/M3)이 산출하는 4가지.
 
-    나머지 레이블(quantile_missing/degenerate_quantile은 M3,
-    feature_insufficient는 M5, manifest_race는 M6/M7)은 이 모듈의 범위 밖이다.
+    나머지 레이블(feature_insufficient는 M5, manifest_race는 M6/M7)은 이
+    모듈의 범위 밖이다.
     """
 
     NO_MANIFEST = "no_manifest"
     SHA_MISMATCH = "sha_mismatch"
+    QUANTILE_MISSING = "quantile_missing"
+    """분위수(p10/p90) 모델 쌍이 배포되지 않음 — (시장,horizon) 조합
+    전체가 confidence 산출 불가로 스킵된다(REQ-AIF-051, M3)."""
+    DEGENERATE_QUANTILE = "degenerate_quantile"
+    """`compute_confidence()`가 축퇴 분포(p10==p90)에서 던지는 ValueError를
+    호출부(`inference/scoring.py`)가 흡수한 결과 — 해당 종목만 스킵된다
+    (REQ-AIF-051, M3)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +123,85 @@ def resolve_serving_targets(
         algorithms=algorithms,
         manifests=manifests,
         model_paths=model_paths,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class QuantileManifest:
+    """(시장,horizon) 조합의 최신 분위수(p10/p90) 모델 쌍(design.md §2,
+    REQ-AIF-050). 챔피언 포인트 모델의 `trained_date`와는 **무관하게**
+    독립적으로 선택된다(AC-AIF-009) — 포인트 모델과 분위수 모델은 서로
+    다른 재학습 주기를 가질 수 있다."""
+
+    market: str
+    horizon: int
+    trained_date: date
+    p10_path: Path
+    p90_path: Path
+
+
+def _scan_quantile_trained_dates(
+    target_dir: Path, market: str, horizon: int, alpha: float
+) -> set[date]:
+    """`quantile_model_filename()`이 생성하는 파일명 관례를 역으로 스캔해
+    디렉토리에 실제 저장된 trained_date 후보 집합을 얻는다.
+
+    `quantile_model_filename()` 자체는 trained_date를 입력으로 받아 파일명을
+    "생성"하는 함수라 역방향(파일명 → trained_date 열거)에는 쓸 수 없다 —
+    여기서는 그 함수가 따르는 명명 규칙(`{prefix}{trained_date}_{tag}.txt`)만
+    재사용해 글롭 스캔한다.
+    """
+    tag = _QUANTILE_ALPHA_TAGS[alpha]
+    prefix = f"{market}_{horizon}_lightgbm_"
+    suffix = f"_{tag}.txt"
+    dates: set[date] = set()
+    if not target_dir.is_dir():
+        return dates
+    for path in target_dir.glob(f"{prefix}*{suffix}"):
+        raw = path.name[len(prefix) : -len(suffix)]
+        try:
+            dates.add(date.fromisoformat(raw))
+        except ValueError:
+            continue
+    return dates
+
+
+def resolve_latest_quantile_manifest(
+    models_root: Path, market: str, horizon: int
+) -> QuantileManifest | None:
+    """design.md §2 — (시장,horizon) 조합에 저장된 p10/p90 분위수 모델 쌍
+    중 **가장 최신 trained_date**를 선택하고 SHA-256 사이드카 검증까지
+    수행한다(REQ-AIF-050, AC-AIF-009). 챔피언 포인트 모델의 trained_date를
+    전혀 참조하지 않는다 — 완전히 독립적인 조회다.
+
+    p10/p90 중 하나만 존재하거나, 모델/사이드카 파일이 없거나, SHA-256
+    검증에 실패하면 `None`을 반환한다 — 분위수 모델 자체가 없는 것과
+    동일하게 취급한다(REQ-AIF-051 경로, 폴백 모델 사용 금지).
+    """
+    target_dir = model_dir(models_root, market, horizon, "lightgbm")
+    p10_dates = _scan_quantile_trained_dates(target_dir, market, horizon, 0.1)
+    p90_dates = _scan_quantile_trained_dates(target_dir, market, horizon, 0.9)
+    common_dates = p10_dates & p90_dates
+    if not common_dates:
+        return None
+
+    latest = max(common_dates)
+    p10_path = target_dir / quantile_model_filename(market, horizon, 0.1, latest)
+    p90_path = target_dir / quantile_model_filename(market, horizon, 0.9, latest)
+    p10_sidecar = p10_path.with_suffix(p10_path.suffix + ".sha256")
+    p90_sidecar = p90_path.with_suffix(p90_path.suffix + ".sha256")
+
+    if not (p10_path.is_file() and p10_sidecar.is_file()):
+        return None
+    if not (p90_path.is_file() and p90_sidecar.is_file()):
+        return None
+    if not verify_model_integrity(p10_path, p10_sidecar):
+        return None
+    if not verify_model_integrity(p90_path, p90_sidecar):
+        return None
+
+    return QuantileManifest(
+        market=market, horizon=horizon, trained_date=latest, p10_path=p10_path, p90_path=p90_path
     )
 
 

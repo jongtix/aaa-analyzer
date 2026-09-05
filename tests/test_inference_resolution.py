@@ -1,5 +1,5 @@
-"""매니페스트 기반 모델 해석 명세 테스트 (SPEC-ANALYZER-INFER-001 M2,
-REQ-AIF-030/031/032/040/041).
+"""매니페스트 기반 모델 해석 명세 테스트 (SPEC-ANALYZER-INFER-001 M2/M3,
+REQ-AIF-030/031/032/040/041/050).
 """
 
 import hashlib
@@ -9,10 +9,12 @@ from pathlib import Path
 import pytest
 
 from analyzer.inference.resolution import (
+    QuantileManifest,
     ScoreColumns,
     ServingPlan,
     SkipReason,
     compute_score_columns,
+    resolve_latest_quantile_manifest,
     resolve_serving_targets,
 )
 from analyzer.orchestration import activation as activation_module
@@ -70,6 +72,33 @@ def _write_full_combo(
 ) -> None:
     _write_activation(models_root, market, horizon, algorithm, trained_date)
     _write_model_with_sidecar(models_root, market, horizon, algorithm, trained_date)
+
+
+def _write_quantile_model_with_sidecar(
+    models_root: Path,
+    market: str,
+    horizon: int,
+    alpha: float,
+    trained_date: date,
+    *,
+    content: bytes | None = None,
+    corrupt_sidecar: bool = False,
+) -> Path:
+    """분위수 모델 파일 + 사이드카를 직접 기록한다 — `save_quantile_model()`은
+    실제 LightGBM 모델 학습을 요구하므로, M2 테스트의
+    `_write_model_with_sidecar()`와 동일한 패턴(더미 바이트 + 수동 SHA-256)을
+    사용한다."""
+    target_dir = persistence_module.model_dir(models_root, market, horizon, "lightgbm")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    model_path = target_dir / persistence_module.quantile_model_filename(
+        market, horizon, alpha, trained_date
+    )
+    payload = content if content is not None else f"dummy-quantile-{alpha}".encode()
+    model_path.write_bytes(payload)
+    sha256 = hashlib.sha256(payload).hexdigest()
+    sidecar_path = model_path.with_suffix(model_path.suffix + ".sha256")
+    sidecar_path.write_text("0" * 64 if corrupt_sidecar else sha256, encoding="utf-8")
+    return model_path
 
 
 class TestResolveServingTargetsEnsemble:
@@ -247,3 +276,140 @@ class TestComputeScoreColumnsSolo:
     def test_unknown_strategy_raises(self):
         with pytest.raises(ValueError):
             compute_score_columns("unknown", {})
+
+
+class TestResolveLatestQuantileManifest:
+    """AC-AIF-009: 챔피언 포인트 모델의 trained_date와 무관하게 최신 분위수
+    모델 쌍을 선택해야 한다."""
+
+    def test_selects_latest_pair_independent_of_champion_trained_date(self, tmp_path: Path):
+        models_root = tmp_path / "models"
+        champion_trained_date = date(2026, 8, 19)
+        _write_full_combo(models_root, "domestic", 20, "lightgbm", champion_trained_date)
+
+        # 분위수 모델은 챔피언과 전혀 다른(더 최신) trained_date로 배포됨.
+        older_quantile_date = date(2026, 7, 1)
+        latest_quantile_date = date(2026, 8, 25)
+        _write_quantile_model_with_sidecar(models_root, "domestic", 20, 0.1, older_quantile_date)
+        _write_quantile_model_with_sidecar(models_root, "domestic", 20, 0.9, older_quantile_date)
+        _write_quantile_model_with_sidecar(models_root, "domestic", 20, 0.1, latest_quantile_date)
+        _write_quantile_model_with_sidecar(models_root, "domestic", 20, 0.9, latest_quantile_date)
+
+        manifest = resolve_latest_quantile_manifest(models_root, "domestic", 20)
+
+        assert isinstance(manifest, QuantileManifest)
+        assert manifest.trained_date == latest_quantile_date
+        assert manifest.trained_date != champion_trained_date
+        assert manifest.p10_path.is_file()
+        assert manifest.p90_path.is_file()
+
+    def test_returns_none_when_quantile_pair_absent(self, tmp_path: Path):
+        models_root = tmp_path / "models"
+        _write_full_combo(models_root, "domestic", 20, "lightgbm", date(2026, 8, 19))
+        # 분위수 모델 자체를 배포하지 않음.
+
+        manifest = resolve_latest_quantile_manifest(models_root, "domestic", 20)
+
+        assert manifest is None
+
+    def test_returns_none_when_only_p10_present(self, tmp_path: Path):
+        models_root = tmp_path / "models"
+        trained_date = date(2026, 8, 25)
+        _write_quantile_model_with_sidecar(models_root, "domestic", 20, 0.1, trained_date)
+        # p90 짝이 없는 불완전한 배포 상태.
+
+        manifest = resolve_latest_quantile_manifest(models_root, "domestic", 20)
+
+        assert manifest is None
+
+    def test_returns_none_on_sha_mismatch(self, tmp_path: Path):
+        models_root = tmp_path / "models"
+        trained_date = date(2026, 8, 25)
+        _write_quantile_model_with_sidecar(models_root, "domestic", 20, 0.1, trained_date)
+        _write_quantile_model_with_sidecar(
+            models_root, "domestic", 20, 0.9, trained_date, corrupt_sidecar=True
+        )
+
+        manifest = resolve_latest_quantile_manifest(models_root, "domestic", 20)
+
+        assert manifest is None
+
+    def test_only_common_trained_date_pairs_are_considered(self, tmp_path: Path):
+        """p10만 있는 최신 날짜는 무시되고, p10/p90 쌍이 모두 존재하는 가장
+        최신 날짜가 선택돼야 한다."""
+        models_root = tmp_path / "models"
+        complete_date = date(2026, 8, 10)
+        p10_only_date = date(2026, 8, 30)
+        _write_quantile_model_with_sidecar(models_root, "domestic", 20, 0.1, complete_date)
+        _write_quantile_model_with_sidecar(models_root, "domestic", 20, 0.9, complete_date)
+        _write_quantile_model_with_sidecar(models_root, "domestic", 20, 0.1, p10_only_date)
+
+        manifest = resolve_latest_quantile_manifest(models_root, "domestic", 20)
+
+        assert isinstance(manifest, QuantileManifest)
+        assert manifest.trained_date == complete_date
+
+    def test_returns_none_when_model_dir_does_not_exist(self, tmp_path: Path):
+        models_root = tmp_path / "models"
+        # models_root 자체가 비어 있어 lightgbm 디렉토리조차 없음.
+
+        manifest = resolve_latest_quantile_manifest(models_root, "domestic", 20)
+
+        assert manifest is None
+
+    def test_ignores_filenames_with_unparseable_trained_date(self, tmp_path: Path):
+        """명명 관례에 맞는 접두/접미사를 가졌으나 trained_date 세그먼트가
+        날짜로 파싱되지 않는 파일은 후보에서 제외돼야 한다."""
+        models_root = tmp_path / "models"
+        target_dir = persistence_module.model_dir(models_root, "domestic", 20, "lightgbm")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        (target_dir / "domestic_20_lightgbm_not-a-date_q10.txt").write_bytes(b"garbage")
+        (target_dir / "domestic_20_lightgbm_not-a-date_q90.txt").write_bytes(b"garbage")
+
+        manifest = resolve_latest_quantile_manifest(models_root, "domestic", 20)
+
+        assert manifest is None
+
+    def test_returns_none_when_p10_sidecar_missing(self, tmp_path: Path):
+        """p10 모델 파일은 글롭으로 발견되지만(파일명 관례 일치) 사이드카가
+        없는 경우 — 뒤늦은 사이드카 부재 체크가 실제로 도달해야 한다."""
+        models_root = tmp_path / "models"
+        trained_date = date(2026, 8, 25)
+        target_dir = persistence_module.model_dir(models_root, "domestic", 20, "lightgbm")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        p10_path = target_dir / persistence_module.quantile_model_filename(
+            "domestic", 20, 0.1, trained_date
+        )
+        p10_path.write_bytes(b"dummy-p10")  # 사이드카 없음.
+        _write_quantile_model_with_sidecar(models_root, "domestic", 20, 0.9, trained_date)
+
+        manifest = resolve_latest_quantile_manifest(models_root, "domestic", 20)
+
+        assert manifest is None
+
+    def test_returns_none_when_p90_sidecar_missing(self, tmp_path: Path):
+        models_root = tmp_path / "models"
+        trained_date = date(2026, 8, 25)
+        _write_quantile_model_with_sidecar(models_root, "domestic", 20, 0.1, trained_date)
+        target_dir = persistence_module.model_dir(models_root, "domestic", 20, "lightgbm")
+        p90_path = target_dir / persistence_module.quantile_model_filename(
+            "domestic", 20, 0.9, trained_date
+        )
+        p90_path.write_bytes(b"dummy-p90")  # 사이드카 없음.
+
+        manifest = resolve_latest_quantile_manifest(models_root, "domestic", 20)
+
+        assert manifest is None
+
+    def test_returns_none_when_p10_sha_mismatch(self, tmp_path: Path):
+        """§ SHA 불일치 케이스 대칭 — p10 쪽이 손상된 경우도 스킵돼야 한다."""
+        models_root = tmp_path / "models"
+        trained_date = date(2026, 8, 25)
+        _write_quantile_model_with_sidecar(
+            models_root, "domestic", 20, 0.1, trained_date, corrupt_sidecar=True
+        )
+        _write_quantile_model_with_sidecar(models_root, "domestic", 20, 0.9, trained_date)
+
+        manifest = resolve_latest_quantile_manifest(models_root, "domestic", 20)
+
+        assert manifest is None
