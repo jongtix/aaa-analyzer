@@ -45,10 +45,9 @@ _QUANTILE_ALPHA_TAGS: Mapping[float, str] = {0.1: "q10", 0.9: "q90"}
 
 
 class SkipReason(StrEnum):
-    """REQ-AIF-130 스킵 사유 레이블 중 이 모듈(M2/M3)이 산출하는 4가지.
+    """REQ-AIF-130 스킵 사유 레이블 중 이 모듈(M2/M3/M5)이 산출하는 5가지.
 
-    나머지 레이블(feature_insufficient는 M5, manifest_race는 M6/M7)은 이
-    모듈의 범위 밖이다.
+    나머지 레이블(manifest_race는 M6/M7)은 이 모듈의 범위 밖이다.
     """
 
     NO_MANIFEST = "no_manifest"
@@ -60,6 +59,11 @@ class SkipReason(StrEnum):
     """`compute_confidence()`가 축퇴 분포(p10==p90)에서 던지는 ValueError를
     호출부(`inference/scoring.py`)가 흡수한 결과 — 해당 종목만 스킵된다
     (REQ-AIF-051, M3)."""
+    FEATURE_INSUFFICIENT = "feature_insufficient"
+    """`inference/features.py`의 61거래일 룩백 요건을 충족하지 못하는
+    종목(원주가 이력 부족) — 그 종목만 스킵되고 같은 (시장,horizon) 배치의
+    나머지 종목 처리에는 영향을 주지 않는다(REQ-AIF-060 전반부, M5,
+    AC-AIF-011)."""
 
 
 @dataclass(frozen=True, slots=True)
