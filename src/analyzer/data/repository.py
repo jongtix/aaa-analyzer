@@ -20,13 +20,34 @@ from collections.abc import Iterator, Sequence
 from datetime import date
 
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import Engine
 
 from analyzer.data.config import DbConfig
 from analyzer.data.models import TradingCalendar
 
 _ANALYZER_DB_USER = "analyzer"
+
+_MARKET_TO_STOCKS_MARKET_CODES: dict[str, tuple[str, ...]] = {
+    "domestic": ("KOSPI", "KOSDAQ"),
+    "overseas": ("NYSE", "NASDAQ", "AMEX"),
+}
+"""(SPEC-ANALYZER-INFER-001 M5, plan.md §B 리스크 7) analyzer 시장 토큰
+("domestic"/"overseas")과 `stocks.market` 거래소 코드의 매핑 —
+`training/train.py`의 동명 매핑(dataset 조립 경로 전용)·
+`inference/trade_date.py`의 `MARKET_TO_STOCKS_MARKET_CODES`(trade_date
+산출 전용)와 값은 동일하지만 의도적으로 복제한다: `data/repository.py`는
+계층상 `training/`·`inference/` 어느 쪽도 임포트할 수 없다(두 패키지가
+이미 `data/repository.py`에 의존하므로 역방향 임포트는 순환 의존을
+만든다) — NAS 실측(2026-08-13)으로 확립된 값이므로 세 위치가 갈라질
+위험은 낮다."""
+
+_STOCK_UNIVERSE_WITH_ID_QUERY = text(
+    "SELECT s.id AS stock_id, s.symbol AS stock_code, g.grade, s.delisted_at "
+    "FROM stocks s "
+    "JOIN stock_grades g ON g.stock_id = s.id "
+    "WHERE s.market IN :market_codes AND s.asset_type = 'STOCK'"
+).bindparams(bindparam("market_codes", expanding=True))
 
 _MARKET_CALENDAR_QUERY = text(
     "SELECT calendar_code, cal_date, is_open "
@@ -148,6 +169,21 @@ def fetch_investor_trend(engine: Engine, stock_code: str) -> pd.DataFrame:
         raise ValueError("stock_code는 비어 있을 수 없다")
 
     return pd.read_sql(_INVESTOR_TREND_QUERY, engine, params={"stock_code": stock_code})
+
+
+def fetch_stock_universe(engine: Engine, market: str) -> pd.DataFrame:
+    """(SPEC-ANALYZER-INFER-001 M5, REQ-AIF-100) 후보 유니버스(A/B등급)를
+    `stock_id` FK 포함 스키마로 조회한다.
+
+    `training/train.py`의 동명 함수(`stock_id` 미포함, dataset 조립 경로
+    전용)는 이 SPEC에서 무수정이다(plan.md §B 리스크 7) — 이 함수는
+    시그니처가 다른 신규 함수이며 이 모듈에만 존재한다. `trading_signals`
+    INSERT 경로(REQ-AIF-100)가 FK로 `stock_id`를 필요로 하는 반면,
+    기존 학습 데이터셋 조립 경로는 `stock_id` 없이도 동작하므로 두
+    함수를 통합하지 않는다(기존 함수 시그니처 변경 금지).
+    """
+    market_codes = _MARKET_TO_STOCKS_MARKET_CODES[market]
+    return pd.read_sql(_STOCK_UNIVERSE_WITH_ID_QUERY, engine, params={"market_codes": market_codes})
 
 
 def iter_investor_trend_by_stock(
