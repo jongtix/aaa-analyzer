@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-09T16:48:00+09:00",
+  "generated_by": "python -m analyzer.training.boundaries_cli (SPEC-ANALYZER-INFER-001 M4)",
+  "data_as_of": "2026-09-08",
+  "source": "실데이터 실현 수익률(label_D20/label_D60, exclude_reason 없는 행) — training/boundaries.py 분위수 역산(REQ-AIF-080)",
+  "target_ratios": {
+    "STRONG_SELL": 0.05,
+    "SELL": 0.2,
+    "HOLD": 0.5,
+    "BUY": 0.2,
+    "STRONG_BUY": 0.05
+  },
+  "combinations": [
+    {
+      "market": "domestic",
+      "horizon": 20,
+      "row_count": 263356,
+      "boundaries": {
+        "STRONG_SELL_SELL": -0.1594699968211029,
+        "SELL_HOLD": -0.055882352941176494,
+        "HOLD_BUY": 0.07486631016042788,
+        "BUY_STRONG_BUY": 0.22658982334469363
+      }
+    },
+    {
+      "market": "domestic",
+      "horizon": 60,
+      "row_count": 260796,
+      "boundaries": {
+        "STRONG_SELL_SELL": -0.24783248040682984,
+        "SELL_HOLD": -0.08711271327029613,
+        "HOLD_BUY": 0.14509849380748552,
+        "BUY_STRONG_BUY": 0.4489501002713225
+      }
+    },
+    {
+      "market": "overseas",
+      "horizon": 20,
+      "row_count": 207721,
+      "boundaries": {
+        "STRONG_SELL_SELL": -0.13613068545803975,
+        "SELL_HOLD": -0.03532155948017335,
+        "HOLD_BUY": 0.06484998101025452,
+        "BUY_STRONG_BUY": 0.18420110493080477
+      }
+    },
+    {
+      "market": "overseas",
+      "horizon": 60,
+      "row_count": 205601,
+      "boundaries": {
+        "STRONG_SELL_SELL": -0.21188002680965157,
+        "SELL_HOLD": -0.04767374705249827,
+        "HOLD_BUY": 0.133057067252484,
+        "BUY_STRONG_BUY": 0.37645107794361543
+      }
+    }
+  ],
+  "grade_margin_delta": {
+    "value": 0.010017154049042788,
+    "provisional": true,
+    "derivation": "0.1 × min(인접 경계 간격) over 4개 조합 전체 (REQ-AIF-111 잠정값)",
+    "min_adjacent_gap": 0.10017154049042787,
+    "replace_by": "SPEC-NOTIFIER-FILTER-001 합동 확정값으로 이 value만 교체 — 구조 변경 불요"
+  }
+}

@@ -18,6 +18,7 @@ from analyzer.inference.boundaries_store import (
     BoundarySet,
     GradeBoundariesArtifact,
     classify_grades,
+    default_artifact_path,
     derive_grade_margin_delta,
     load_grade_boundaries,
     shift_boundaries,
@@ -251,3 +252,48 @@ class TestClassifyGrades:
 
         with pytest.raises(KeyError):
             artifact.classify("domestic", 120, [0.0])
+
+
+class TestPackagedArtifact:
+    """패키지 동봉 실측 산출물(`grade_boundaries.json`) — 구조만 검증하고 수치는 단언하지 않는다."""
+
+    def test_default_path_points_inside_inference_package(self):
+        path = default_artifact_path()
+
+        assert path.name == "grade_boundaries.json"
+        assert path.parent.name == "inference"
+        assert path.is_file()
+
+    def test_packaged_artifact_loads_with_four_combinations_and_provisional_delta(self):
+        artifact = load_grade_boundaries()
+
+        assert len(artifact.boundaries_by_combination) == 4
+        assert artifact.grade_margin_delta > 0
+        assert artifact.grade_margin_delta_provisional is True
+        assert artifact.target_ratios == _SYNTHETIC_RATIOS  # 사용자 확정 목표 비율(입력값)
+        assert all(n > 0 for n in artifact.row_counts.values())
+        assert artifact.data_as_of <= date.today()
+
+    def test_packaged_delta_keeps_all_shifted_sets_monotonic(self):
+        artifact = load_grade_boundaries()
+
+        for market, horizon in artifact.boundaries_by_combination:
+            for boundary_set in BoundarySet:
+                shifted = artifact.boundaries_for(market, horizon, boundary_set)
+                values = list(shifted.values())
+                assert values == sorted(values)
+
+    def test_ac_aif_015_packaged_artifact_two_startups_never_recompute(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        infer_single = MagicMock(name="infer_grade_boundaries")
+        infer_all = MagicMock(name="infer_grade_boundaries_all_combinations")
+        monkeypatch.setattr(boundaries_module, "infer_grade_boundaries", infer_single)
+        monkeypatch.setattr(boundaries_module, "infer_grade_boundaries_all_combinations", infer_all)
+
+        first = load_grade_boundaries()
+        second = load_grade_boundaries()
+
+        assert infer_single.call_count == 0
+        assert infer_all.call_count == 0
+        assert first == second
