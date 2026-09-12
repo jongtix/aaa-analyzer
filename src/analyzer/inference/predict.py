@@ -47,27 +47,42 @@ def _select_feature_columns(
     return feature_row.loc[:, feature_columns]
 
 
-def _predict_lightgbm(model_path: Path, feature_row: pd.DataFrame) -> float:
+def _predict_lightgbm_array(model_path: Path, feature_matrix: pd.DataFrame) -> np.ndarray:
     feature_columns = resolve_feature_columns(model_path)
-    selected = _select_feature_columns(feature_row, feature_columns, model_path)
+    selected = _select_feature_columns(feature_matrix, feature_columns, model_path)
     booster = lgb.Booster(model_file=str(model_path))
-    prediction = np.asarray(booster.predict(selected))
-    return float(prediction[0])
+    return np.asarray(booster.predict(selected))
 
 
-def _predict_xgboost(model_path: Path, feature_row: pd.DataFrame) -> float:
+def _predict_xgboost_array(model_path: Path, feature_matrix: pd.DataFrame) -> np.ndarray:
     feature_columns = resolve_feature_columns(model_path)
-    selected = _select_feature_columns(feature_row, feature_columns, model_path)
+    selected = _select_feature_columns(feature_matrix, feature_columns, model_path)
     booster = xgb.Booster()
     booster.load_model(str(model_path))
     dmatrix = xgb.DMatrix(selected)
-    prediction = np.asarray(booster.predict(dmatrix))
-    return float(prediction[0])
+    return np.asarray(booster.predict(dmatrix))
+
+
+def _predict_lightgbm(model_path: Path, feature_row: pd.DataFrame) -> float:
+    return float(_predict_lightgbm_array(model_path, feature_row)[0])
+
+
+def _predict_xgboost(model_path: Path, feature_row: pd.DataFrame) -> float:
+    return float(_predict_xgboost_array(model_path, feature_row)[0])
+
+
+class _BatchPredictor(Protocol):
+    def __call__(self, model_path: Path, feature_matrix: pd.DataFrame) -> np.ndarray: ...
 
 
 _POINT_PREDICTORS: Mapping[str, _PointPredictor] = {
     "lightgbm": _predict_lightgbm,
     "xgboost": _predict_xgboost,
+}
+
+_POINT_PREDICTORS_BATCH: Mapping[str, _BatchPredictor] = {
+    "lightgbm": _predict_lightgbm_array,
+    "xgboost": _predict_xgboost_array,
 }
 
 
@@ -85,6 +100,28 @@ def predict_point_models(serving_plan: ServingPlan, feature_row: pd.DataFrame) -
         if predictor is None:
             raise ValueError(f"지원하지 않는 algorithm: {algorithm!r}")
         predictions[algorithm] = predictor(model_path, feature_row)
+    return predictions
+
+
+def predict_point_models_batch(
+    serving_plan: ServingPlan, feature_matrix: pd.DataFrame
+) -> dict[str, np.ndarray]:
+    """`serving_plan.model_paths`에 담긴 각 알고리즘의 booster를 **한 번만**
+    로드해 `feature_matrix`(그리드 크기만큼의 행) 전체를 배치로 예측한다
+    (SPEC-ANALYZER-INFER-001 M6, design.md §5, REQ-AIF-110/111).
+
+    `predict_point_models()`와 달리 booster를 매 그리드 가격마다 다시
+    로드하지 않는다 — 밴드 스윕은 종목당 수십~수백 개의 그리드 가격을
+    가지므로, 행 단위 반복 대신 이 함수로 한 번에 예측해야 한다. 반환값은
+    알고리즘명을 키로, `feature_matrix`와 동일한 행 수의 예측값 배열을
+    값으로 갖는 매핑이다.
+    """
+    predictions: dict[str, np.ndarray] = {}
+    for algorithm, model_path in serving_plan.model_paths.items():
+        predictor = _POINT_PREDICTORS_BATCH.get(algorithm)
+        if predictor is None:
+            raise ValueError(f"지원하지 않는 algorithm: {algorithm!r}")
+        predictions[algorithm] = predictor(model_path, feature_matrix)
     return predictions
 
 

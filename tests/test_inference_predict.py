@@ -15,7 +15,11 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 
-from analyzer.inference.predict import predict_point_models, predict_quantile_models
+from analyzer.inference.predict import (
+    predict_point_models,
+    predict_point_models_batch,
+    predict_quantile_models,
+)
 from analyzer.inference.resolution import (
     QuantileManifest,
     ServingPlan,
@@ -186,6 +190,61 @@ class TestPredictPointModelsUnsupportedAlgorithm:
 
         try:
             predict_point_models(plan, feature_row)
+            raise AssertionError("알 수 없는 algorithm 키에 대해 ValueError가 발생해야 한다")
+        except ValueError as exc:
+            assert "unknown_algo" in str(exc)
+
+
+def _feature_matrix(feature_columns: list[str], n_rows: int) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            col: [0.1 * (i + 1) + 0.01 * row for row in range(n_rows)]
+            for i, col in enumerate(feature_columns)
+        }
+    )
+
+
+class TestPredictPointModelsBatch:
+    """SPEC-ANALYZER-INFER-001 M6: 밴드 스윕은 booster를 그리드 크기만큼
+    반복 로드하지 않고 한 번만 로드해 배치로 예측해야 한다(design.md §5)."""
+
+    def test_returns_array_per_algorithm_matching_matrix_row_count(self, tmp_path: Path):
+        feature_columns = ["roc_60", "ma_60"]
+        lgbm_path = _train_lightgbm(tmp_path, "lgbm_batch", feature_columns, seed=20)
+        xgb_path = _train_xgboost(tmp_path, "xgb_batch", feature_columns, seed=21)
+        plan = _serving_plan("ensemble", {"lightgbm": lgbm_path, "xgboost": xgb_path})
+        matrix = _feature_matrix(feature_columns, n_rows=5)
+
+        predictions = predict_point_models_batch(plan, matrix)
+
+        assert set(predictions.keys()) == {"lightgbm", "xgboost"}
+        assert predictions["lightgbm"].shape == (5,)
+        assert predictions["xgboost"].shape == (5,)
+
+    def test_batch_prediction_matches_row_by_row_single_prediction(self, tmp_path: Path):
+        """boundary-verification: 배치 예측 결과가 행 단위 `predict_point_models()`
+        호출 결과와 정확히 일치해야 한다 — booster 로드 방식만 다를 뿐 같은
+        모델·같은 입력이면 같은 출력이어야 한다."""
+        feature_columns = ["roc_60"]
+        lgbm_path = _train_lightgbm(tmp_path, "lgbm_match", feature_columns, seed=22)
+        plan = _serving_plan("lightgbm", {"lightgbm": lgbm_path})
+        matrix = _feature_matrix(feature_columns, n_rows=3)
+
+        batch_predictions = predict_point_models_batch(plan, matrix)
+
+        for i in range(3):
+            row = matrix.iloc[[i]].reset_index(drop=True)
+            single = predict_point_models(plan, row)
+            assert batch_predictions["lightgbm"][i] == single["lightgbm"]
+
+    def test_unknown_algorithm_key_raises_value_error(self, tmp_path: Path):
+        feature_columns = ["roc_60"]
+        dummy_path = _train_lightgbm(tmp_path, "dummy_batch", feature_columns, seed=23)
+        plan = _serving_plan("ensemble", {"unknown_algo": dummy_path})
+        matrix = _feature_matrix(feature_columns, n_rows=2)
+
+        try:
+            predict_point_models_batch(plan, matrix)
             raise AssertionError("알 수 없는 algorithm 키에 대해 ValueError가 발생해야 한다")
         except ValueError as exc:
             assert "unknown_algo" in str(exc)
