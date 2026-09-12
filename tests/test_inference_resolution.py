@@ -14,6 +14,7 @@ from analyzer.inference.resolution import (
     ServingPlan,
     SkipReason,
     compute_score_columns,
+    detect_manifest_race,
     resolve_latest_quantile_manifest,
     resolve_serving_targets,
 )
@@ -413,3 +414,58 @@ class TestResolveLatestQuantileManifest:
         manifest = resolve_latest_quantile_manifest(models_root, "domestic", 20)
 
         assert manifest is None
+
+
+class TestDetectManifestRace:
+    """design.md §7, REQ-AIF-060 후반부(M6): 모델 로드 직후 매니페스트를
+    재확인해 학습 잡과의 레이스를 감지한다(AC-AIF-011 레이스 시나리오)."""
+
+    def test_returns_false_when_manifest_unchanged(self, tmp_path: Path):
+        models_root = tmp_path / "models"
+        trained_date = date(2026, 8, 19)
+        _write_strategy(models_root, "domestic", 20, "xgboost")
+        _write_full_combo(models_root, "domestic", 20, "xgboost", trained_date)
+        plan = resolve_serving_targets(models_root, "domestic", 20)
+        assert isinstance(plan, ServingPlan)
+
+        assert detect_manifest_race(models_root, plan) is False
+
+    def test_returns_true_when_trained_date_changed_after_load(self, tmp_path: Path):
+        models_root = tmp_path / "models"
+        old_date = date(2026, 8, 19)
+        new_date = date(2026, 9, 1)
+        _write_strategy(models_root, "domestic", 20, "xgboost")
+        _write_full_combo(models_root, "domestic", 20, "xgboost", old_date)
+        plan = resolve_serving_targets(models_root, "domestic", 20)
+        assert isinstance(plan, ServingPlan)
+
+        # Simulate a training job promoting a new manifest between read and load.
+        _write_full_combo(models_root, "domestic", 20, "xgboost", new_date)
+
+        assert detect_manifest_race(models_root, plan) is True
+
+    def test_returns_true_when_manifest_disappears_after_load(self, tmp_path: Path):
+        models_root = tmp_path / "models"
+        trained_date = date(2026, 8, 19)
+        _write_strategy(models_root, "domestic", 20, "xgboost")
+        _write_full_combo(models_root, "domestic", 20, "xgboost", trained_date)
+        plan = resolve_serving_targets(models_root, "domestic", 20)
+        assert isinstance(plan, ServingPlan)
+
+        activation_module.activation_manifest_path(models_root, "domestic", 20, "xgboost").unlink()
+
+        assert detect_manifest_race(models_root, plan) is True
+
+    def test_ensemble_combo_detects_race_on_either_algorithm(self, tmp_path: Path):
+        models_root = tmp_path / "models"
+        old_date = date(2026, 8, 19)
+        new_date = date(2026, 9, 1)
+        _write_strategy(models_root, "domestic", 20, "ensemble")
+        _write_full_combo(models_root, "domestic", 20, "lightgbm", old_date)
+        _write_full_combo(models_root, "domestic", 20, "xgboost", old_date)
+        plan = resolve_serving_targets(models_root, "domestic", 20)
+        assert isinstance(plan, ServingPlan)
+
+        _write_full_combo(models_root, "domestic", 20, "lightgbm", new_date)
+
+        assert detect_manifest_race(models_root, plan) is True

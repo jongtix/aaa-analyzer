@@ -45,10 +45,7 @@ _QUANTILE_ALPHA_TAGS: Mapping[float, str] = {0.1: "q10", 0.9: "q90"}
 
 
 class SkipReason(StrEnum):
-    """REQ-AIF-130 스킵 사유 레이블 중 이 모듈(M2/M3/M5)이 산출하는 5가지.
-
-    나머지 레이블(manifest_race는 M6/M7)은 이 모듈의 범위 밖이다.
-    """
+    """REQ-AIF-130 스킵 사유 레이블 중 이 모듈(M2/M3/M5/M6)이 산출하는 6가지."""
 
     NO_MANIFEST = "no_manifest"
     SHA_MISMATCH = "sha_mismatch"
@@ -64,6 +61,11 @@ class SkipReason(StrEnum):
     종목(원주가 이력 부족) — 그 종목만 스킵되고 같은 (시장,horizon) 배치의
     나머지 종목 처리에는 영향을 주지 않는다(REQ-AIF-060 전반부, M5,
     AC-AIF-011)."""
+    MANIFEST_RACE = "manifest_race"
+    """학습 잡(주간/월간)과 추론 스케줄이 겹치는 창에서 매니페스트 read와
+    모델 파일 load 사이에 `promote_activation_manifest()`가 개입해 파일이
+    교체된 경우 — `detect_manifest_race()`가 로드 직후 재확인해 감지한다
+    (REQ-AIF-060 후반부, design.md §7, M6)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +219,25 @@ class ScoreColumns:
     lgbm_score: float | None
     xgb_score: float | None
     score: float
+
+
+def detect_manifest_race(models_root: Path, serving_plan: ServingPlan) -> bool:
+    """모델 파일을 실제로 로드한 직후 매니페스트를 재확인해 학습 잡과의
+    레이스를 감지한다(design.md §7, REQ-AIF-060 후반부).
+
+    `serving_plan.manifests`에 기록된 각 알고리즘의 `trained_date`와, 지금
+    시점의 `read_activation_manifest()` 결과를 대조한다 — 매니페스트가
+    사라졌거나(`None`) `trained_date`가 달라졌으면 그 사이 학습 잡의
+    `promote_activation_manifest()`(원자적 `os.replace()`)가 개입한
+    것이므로 레이스로 판정한다(`True`). 일치하면 `False`.
+    """
+    for algorithm, manifest in serving_plan.manifests.items():
+        current = read_activation_manifest(
+            models_root, serving_plan.market, serving_plan.horizon, algorithm
+        )
+        if current is None or current.trained_date != manifest.trained_date:
+            return True
+    return False
 
 
 def compute_score_columns(active_strategy: str, predictions: Mapping[str, float]) -> ScoreColumns:

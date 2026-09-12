@@ -13,9 +13,11 @@ from sqlalchemy.exc import IntegrityError
 
 from analyzer.inference.writer import (
     InsertOutcome,
+    PriceBandRow,
     TradingSignalRow,
     format_horizon_label,
     format_model_version,
+    insert_signal_price_bands,
     insert_trading_signal,
 )
 
@@ -123,3 +125,108 @@ class TestInsertTradingSignal:
         params = conn.execute.call_args[0][1]
         assert params["horizon"] == "D60"
         assert params["model_version"] == "overseas_60_xgboost_2026-08-19"
+
+
+def _price_band_row(**overrides) -> PriceBandRow:
+    defaults = {
+        "stock_id": 1,
+        "trade_date": date(2026, 9, 10),
+        "horizon": 20,
+        "boundary_set": "PROMOTE",
+        "band_seq": 0,
+        "price_low": 45000.0,
+        "price_high": 46000.0,
+        "signal_class": "BUY",
+        "model_version": "domestic_20_ensemble_2026-08-19",
+    }
+    defaults.update(overrides)
+    return PriceBandRow(**defaults)
+
+
+class TestInsertSignalPriceBands:
+    """AC-AIF-019: 사전 SELECT + boundary_set 단위 스킵 + TOCTOU 캐치-스킵."""
+
+    def test_first_insert_inserts_all_rows_in_one_transaction(self):
+        engine, conn = _mock_engine_and_conn()
+        select_result = MagicMock()
+        select_result.first.return_value = None
+        conn.execute.return_value = select_result
+        rows = [_price_band_row(band_seq=i) for i in range(3)]
+
+        outcome = insert_signal_price_bands(engine, rows)
+
+        assert outcome == InsertOutcome.INSERTED
+        assert conn.execute.call_count == 4  # 1 SELECT + 3 INSERT
+
+    def test_existing_combination_is_skipped_without_any_insert(self):
+        engine, conn = _mock_engine_and_conn()
+        select_result = MagicMock()
+        select_result.first.return_value = (1,)
+        conn.execute.return_value = select_result
+        rows = [_price_band_row(band_seq=0)]
+
+        outcome = insert_signal_price_bands(engine, rows)
+
+        assert outcome == InsertOutcome.SKIPPED_DUPLICATE
+        assert conn.execute.call_count == 1
+
+    def test_integrity_error_during_insert_is_caught_and_skipped(self):
+        engine, conn = _mock_engine_and_conn()
+        select_result = MagicMock()
+        select_result.first.return_value = None
+        conn.execute.side_effect = [
+            select_result,
+            IntegrityError("stmt", {}, Exception("Duplicate entry")),
+        ]
+        rows = [_price_band_row(band_seq=0), _price_band_row(band_seq=1)]
+
+        outcome = insert_signal_price_bands(engine, rows)
+
+        assert outcome == InsertOutcome.SKIPPED_DUPLICATE
+
+    def test_promote_and_demote_are_independent_four_tuples(self):
+        """AC-AIF-019 두 번째 worked example: PROMOTE만 이미 존재하면 PROMOTE는
+        스킵, DEMOTE는 신규 INSERT돼야 한다."""
+        engine_promote, conn_promote = _mock_engine_and_conn()
+        exists_result = MagicMock()
+        exists_result.first.return_value = (1,)
+        conn_promote.execute.return_value = exists_result
+
+        engine_demote, conn_demote = _mock_engine_and_conn()
+        absent_result = MagicMock()
+        absent_result.first.return_value = None
+        conn_demote.execute.return_value = absent_result
+
+        promote_outcome = insert_signal_price_bands(
+            engine_promote, [_price_band_row(boundary_set="PROMOTE")]
+        )
+        demote_outcome = insert_signal_price_bands(
+            engine_demote, [_price_band_row(boundary_set="DEMOTE")]
+        )
+
+        assert promote_outcome == InsertOutcome.SKIPPED_DUPLICATE
+        assert demote_outcome == InsertOutcome.INSERTED
+        select_call = conn_promote.execute.call_args_list[0]
+        assert select_call[0][1]["boundary_set"] == "PROMOTE"
+
+    def test_empty_rows_raises_value_error(self):
+        engine, _ = _mock_engine_and_conn()
+
+        try:
+            insert_signal_price_bands(engine, [])
+            raise AssertionError("빈 rows에 대해 ValueError가 발생해야 한다")
+        except ValueError:
+            pass
+
+    def test_regime_suppressed_always_false(self):
+        engine, conn = _mock_engine_and_conn()
+        select_result = MagicMock()
+        select_result.first.return_value = None
+        conn.execute.return_value = select_result
+
+        insert_signal_price_bands(engine, [_price_band_row()])
+
+        insert_call = conn.execute.call_args_list[-1]
+        params = insert_call[0][1]
+        assert params["regime_suppressed"] is False
+        assert params["model_version"] == "domestic_20_ensemble_2026-08-19"

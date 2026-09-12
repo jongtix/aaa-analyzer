@@ -16,6 +16,7 @@ confidence)가 이미 산출한 결과를 `TradingSignalRow`로 조립해 전달
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -127,4 +128,97 @@ def insert_trading_signal(engine: Engine, row: TradingSignalRow) -> str:
             )
         except IntegrityError:
             return InsertOutcome.SKIPPED_DUPLICATE
+    return InsertOutcome.INSERTED
+
+
+_SELECT_PRICE_BAND_EXISTS_SQL = text(
+    "SELECT 1 FROM signal_price_bands "
+    "WHERE stock_id = :stock_id AND trade_date = :trade_date AND horizon = :horizon "
+    "AND boundary_set = :boundary_set LIMIT 1"
+)
+"""REQ-AIF-111: (stock_id, trade_date, horizon, boundary_set) 4-튜플 단위
+사전 존재 확인 — 존재하면 그 boundary_set 전체를 스킵한다(band_seq 단위
+부분 재삽입 금지)."""
+
+_INSERT_PRICE_BAND_SQL = text(
+    "INSERT INTO signal_price_bands "
+    "(stock_id, trade_date, horizon, boundary_set, band_seq, price_low, price_high, "
+    "signal_class, regime_suppressed, model_version, created_at) "
+    "VALUES (:stock_id, :trade_date, :horizon, :boundary_set, :band_seq, :price_low, "
+    ":price_high, :signal_class, :regime_suppressed, :model_version, :created_at)"
+)
+"""V44(SPEC-ANALYZER-SCHEMA-001) 컬럼 계약. `trading_signals`와 달리
+`updated_at` 컬럼이 없다(INSERT-ONLY 전제가 스키마에도 반영됨)."""
+
+
+@dataclass(frozen=True, slots=True)
+class PriceBandRow:
+    """`signal_price_bands` 1행 — 밴드 스윕(`inference/sweep.py`, M6)이
+    산출한 (price_low, price_high, signal_class) 조각 하나에 대응한다
+    (REQ-AIF-110/111)."""
+
+    stock_id: int
+    trade_date: date
+    horizon: int
+    boundary_set: str
+    band_seq: int
+    price_low: float
+    price_high: float
+    signal_class: str
+    model_version: str
+    regime_suppressed: bool = False
+    """REQ-AIF-090: `trading_signals`와 동일하게 항상 FALSE로 고정 기록한다."""
+
+
+def insert_signal_price_bands(engine: Engine, rows: Sequence[PriceBandRow]) -> str:
+    """`signal_price_bands`에 (stock_id, trade_date, horizon, boundary_set)
+    단위로 사전 SELECT 후 일괄 INSERT한다(REQ-AIF-111, AC-AIF-019).
+
+    `rows`는 모두 동일한 (stock_id, trade_date, horizon, boundary_set)에
+    속해야 한다 — 이 함수는 그 4-튜플이 이미 존재하면 `rows` 전체를
+    스킵하고(부분 밴드 세트 혼재 방지), 존재하지 않으면 `rows`를 band_seq
+    순서 그대로 **같은 트랜잭션**에서 일괄 INSERT한다. 사전 SELECT와 실제
+    INSERT 사이의 TOCTOU 간극에서 동시 실행 프로세스가 먼저 삽입을
+    완료하면 `IntegrityError`가 발생하는데, 이 경우 트랜잭션 전체가
+    롤백되므로(부분 삽입 없음) `trading_signals`와 동일하게 "이미 처리됨"
+    신호로 캐치-스킵한다.
+    """
+    if not rows:
+        raise ValueError("rows는 비어 있을 수 없다")
+
+    first = rows[0]
+    inserted_at = datetime.now(_KST)
+    try:
+        with engine.begin() as conn:
+            exists = conn.execute(
+                _SELECT_PRICE_BAND_EXISTS_SQL,
+                {
+                    "stock_id": first.stock_id,
+                    "trade_date": first.trade_date,
+                    "horizon": format_horizon_label(first.horizon),
+                    "boundary_set": first.boundary_set,
+                },
+            ).first()
+            if exists is not None:
+                return InsertOutcome.SKIPPED_DUPLICATE
+
+            for row in rows:
+                conn.execute(
+                    _INSERT_PRICE_BAND_SQL,
+                    {
+                        "stock_id": row.stock_id,
+                        "trade_date": row.trade_date,
+                        "horizon": format_horizon_label(row.horizon),
+                        "boundary_set": row.boundary_set,
+                        "band_seq": row.band_seq,
+                        "price_low": row.price_low,
+                        "price_high": row.price_high,
+                        "signal_class": row.signal_class,
+                        "regime_suppressed": row.regime_suppressed,
+                        "model_version": row.model_version,
+                        "created_at": inserted_at,
+                    },
+                )
+    except IntegrityError:
+        return InsertOutcome.SKIPPED_DUPLICATE
     return InsertOutcome.INSERTED
