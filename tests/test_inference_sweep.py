@@ -128,7 +128,7 @@ class TestBuildPriceGrid:
         center = grid[len(grid) // 2]
         assert center == pytest.approx(50_000.0)
 
-    def test_overseas_grid_uses_provisional_range(self):
+    def test_overseas_grid_uses_confirmed_range(self):
         grid = build_price_grid(100.0, "overseas")
 
         assert grid.min() == pytest.approx(100.0 * (1 - OVERSEAS_GRID_RANGE_PCT))
