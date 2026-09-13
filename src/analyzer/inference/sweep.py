@@ -1,7 +1,8 @@
 """밴드 스윕 + signal_price_bands INSERT + 학습 잡 레이스 방어
-(SPEC-ANALYZER-INFER-001 M6, REQ-AIF-110/111/060, design.md §5/§7).
+(SPEC-ANALYZER-INFER-001 M6/M7, REQ-AIF-110/111/060, design.md §5/§7).
 
-가격 그리드(국내 확정값 ±30%/0.5%, 해외 M7 실측 전 잠정값)로 가상 종가를
+가격 그리드(국내 ±30%/0.5%, 해외 ±21.5%/0.5% — 둘 다 M7 실측으로 확정,
+`OVERSEAS_GRID_RANGE_PCT`/`MERGE_THRESHOLD_PCT` 참조)로 가상 종가를
 구성해, PRICE_DERIVED 피처만 그리드별로 재계산하고 FROZEN 피처는 실제
 마지막 행의 값으로 동결한다(TECHSPEC:1192 "나머지 조건은 전일과 동일") —
 `inference/features.py`가 이미 산출하는 실제 조립 결과를 그대로 재사용해
@@ -53,17 +54,50 @@ from analyzer.inference.writer import PriceBandRow, insert_signal_price_bands
 DOMESTIC_GRID_RANGE_PCT = 0.30
 """REQ-AIF-110 확정값 — 국내 가격제한폭(상한가/하한가) ±30%(TECHSPEC:1174)."""
 
-OVERSEAS_GRID_RANGE_PCT = 0.15
-"""REQ-AIF-110 잠정값 — 해외는 가격제한폭이 없어 통계적 범위를 M7에서
-과거 일중 등락 분포 실측(99.9% 커버)으로 확정한다(TECHSPEC:1175 초안 ±15%).
-이 값은 M7 실측 결과로 교체될 잠정값이다."""
+OVERSEAS_GRID_RANGE_PCT = 0.215
+"""REQ-AIF-110 확정값(M7 실측, 2026-09-12) — 해외는 가격제한폭이 없어
+과거 일중 등락 분포 실측으로 범위를 확정한다(TECHSPEC:1175).
+
+방법: NAS 프로덕션 DB `daily_ohlcv` 해외 유니버스(`stocks.market IN
+('NYSE','NASDAQ','AMEX') AND asset_type='STOCK'`, 76종목, 278,064행,
+2007-08-20~2026-09-10) 전체에 대해 `LAG(close_price) OVER (PARTITION BY
+stock_id ORDER BY trade_date)`로 종목별 일간 등락률을 계산했다.
+`corporate_events`의 확정 SPLIT 이벤트(18건) 전후 ±3일 구간을 제외해도
+p99.9 값은 21.39% → 21.25%로만 소폭 변동해 SPLIT 아티팩트가 이 분위수에
+실질적 영향을 주지 않음을 확인했다(=해외 유니버스 최댓값 187.1%,
+SERV 2024-07-19은 SPLIT이 아닌 실제 급등).
+
+설계 의도(§ 밴드 스윕 알고리즘 docstring, plan.md M7)는 99.9% 과거
+커버리지를 목표로 하므로, SPLIT 제외 p99.9(21.25%)를 `GRID_STEP_PCT`(0.5%)
+단위로 올림해 커버리지 보장을 유지했다: 21.25% → **21.5%**."""
 
 GRID_STEP_PCT = 0.005
 """REQ-AIF-110 확정값 — 그리드 간격 0.5%(TECHSPEC:1176)."""
 
 MERGE_THRESHOLD_PCT = 0.01
-"""REQ-AIF-111 잠정값 — 조각 병합 폭 임계 1%(TECHSPEC:1180 초안값, M7 실측
-확정 대상)."""
+"""REQ-AIF-111 확정값(M7 실측, 2026-09-12) — 조각 병합 폭 임계 1%
+(TECHSPEC:1180). 착수 시점 초안값과 동일하게 확정됐다(측정이 초안을
+검증한 사례 — 값 자체는 변경 없음).
+
+방법: NAS 프로덕션 DB의 실제 챔피언 모델(domestic D60 xgboost, overseas
+D20 xgboost)로 표본 종목(각 12종목)에 대해 실제 밴드 스윕을 실행하고,
+후보 임계값 {0.5%, 1%, 1.5%, 2%, 3%}마다 두 지표를 측정했다: (a) 병합
+전(run-length) 원시 밴드 중 "슬리버"(그리드 1칸 폭, `GRID_STEP_PCT` ≈
+0.5%인 노이즈 조각)가 병합되는 비율, (b) 슬리버가 아닌 "정상" 전환
+밴드(2칸 이상 폭)가 잘못 병합되는 비율.
+
+domestic D60(표본 12종목, 원시 평균 10.08밴드): 0.5%에서는 슬리버
+24/41(59%)만 병합돼 불충분, **1%에서 슬리버 41/41(100%) 병합되면서
+정상 밴드 병합은 0/80(0%)** — 슬리버를 전부 흡수하는 가장 작은 임계값이자
+정상 전환을 훼손하지 않는 경계. 1.5%부터 정상 밴드 병합이 시작된다
+(13/80, 16%), 2%는 18/80(22.5%), 3%는 25/80(31%) — 임계값을 더 키울수록
+실제 등급 전환 정보가 점점 더 손실된다. overseas D20(표본 12종목)은 원시
+밴드 수 자체가 매우 적어(평균 1.33밴드) 임계값 민감도를 독립적으로
+검증하기엔 정보량이 부족했으나 domestic 결론과 모순되는 신호는 없었다.
+overseas D60은 별개로 발견된 프로덕션 결함(챔피언 모델에 `.meta.json`
+사이드카 부재 → FEATURE_REGISTRY 전체 폴백 → 해외 수급 데이터 부재와
+충돌, `.moai/specs/SPEC-ANALYZER-INFER-001/progress.md` M7 항목 참조)으로
+인해 실측 불가 — Gap으로 보고."""
 
 _GRID_RANGE_PCT_BY_MARKET: dict[str, float] = {
     "domestic": DOMESTIC_GRID_RANGE_PCT,
