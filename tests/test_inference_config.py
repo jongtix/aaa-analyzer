@@ -44,9 +44,10 @@ class TestGetInferenceConfig:
             stream_claim_idle_seconds=DEFAULT_STREAM_CLAIM_IDLE_SECONDS,
         )
 
-    def test_default_idle_threshold_is_ten_minutes(self):
-        """REQ-AIF-020: 착수 시점 잠정값 600초(10분) — M7 실측 후 조정 대상."""
-        assert DEFAULT_STREAM_CLAIM_IDLE_SECONDS == 600
+    def test_default_idle_threshold_is_thirty_minutes(self):
+        """REQ-AIF-020: 확정값 1800초(30분) — M7 실측(2026-09-12) 근거로
+        착수 시점 잠정값(600초)에서 상향."""
+        assert DEFAULT_STREAM_CLAIM_IDLE_SECONDS == 1800
 
     def test_idle_threshold_can_be_overridden(self, monkeypatch: pytest.MonkeyPatch):
         _set_required(monkeypatch)
