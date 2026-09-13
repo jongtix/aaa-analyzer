@@ -18,9 +18,23 @@ from dataclasses import dataclass
 
 from analyzer.data.config import MissingConfigError
 
-DEFAULT_STREAM_CLAIM_IDLE_SECONDS = 600
-"""REQ-AIF-020 착수 시점 잠정값(10분). M7에서 실측한 추론 사이클 소요시간
-p99을 근거로 REQ-AIF-142의 vmalert 데드맨 N값과 함께 조정한다."""
+DEFAULT_STREAM_CLAIM_IDLE_SECONDS = 1800
+"""REQ-AIF-020 확정값(30분, M7 실측 2026-09-12) — 착수 시점 잠정값(600초/
+10분)에서 상향. NAS 프로덕션 DB·실제 챔피언 모델로 (feature 조립 + 포인트
+모델 배치 predict + 밴드 스윕) 전체 사이클을 시장 전체 A·B등급 유니버스에
+대해 1회 측정한 결과, domestic(단일 활성 horizon D60, 62종목) 전체
+사이클이 745.88초(≈12.4분)로 종전 600초 기본값을 **이미 초과**했다 —
+600초는 자기유발 중복 스폰(XAUTOCLAIM 자가-재소유) 위험이 실측으로
+확인된 안전하지 않은 값이었다. overseas(D20/D60, 53종목)는 306.86초로
+더 짧다(D60은 별도 발견된 프로덕션 결함으로 predict 자체가 실패해 사실상
+D20만 반영됨 — progress.md M7 참조). domestic 측정치(worst case) 대비
+약 2.4배 마진을 두고 REQ-AIF-142의 vmalert 데드맨 N값(30분)과 동일하게
+맞췄다 — 두 값 모두 "사이클이 정상보다 오래 걸린다"는 동일 실패 부류를
+서로 다른 계층(내부 자가-재수령 가드 vs 외부 알람)에서 방어하므로 값을
+맞추면 운용자가 기억·튜닝하기 쉽다. 도메스틱에 향후 horizon D20이 추가
+활성화되면(현재는 챔피언 부재로 비활성) 사이클이 대략 2배로 늘어날 수
+있어(약 1465초 추정) 재실측이 필요하다 — 이 값은 실측 시점의 활성 조합
+구성에 종속적이다."""
 
 MINIMUM_STREAM_CLAIM_IDLE_SECONDS = 60
 """REQ-AIF-020(shall not): 실제 추론 사이클 소요 시간에 근접하거나 못 미치는
