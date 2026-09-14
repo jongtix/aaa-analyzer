@@ -5,11 +5,11 @@ SPEC-ANALYZER-INFER-001 M1(REQ-AIF-010): `python -m analyzer.inference
 1=전조합 스킵, 2=부분실패)으로 결과를 부모에게 알린다. 결과를 stdout으로
 반환하지 않는다 — stdout은 구조화 로그 전용이다.
 
-M1 시점에는 추론 파이프라인 본체(매니페스트 해석 M2, 분위수 서빙 M3, 등급
-경계 M4, 피처 조립+INSERT M5, 밴드 스윕 M6)가 아직 배선되지 않았으므로
-`run_market_inference()`는 "처리한 조합 없음"을 반환하고 프로세스는 종료코드
-1(전조합 스킵)로 끝난다. FOUNDATION-001 시절의 무조건 exit 0은 아무것도 하지
-않은 실행을 성공으로 보고하는 것이어서 이 SPEC이 대체한다.
+SPEC-ANALYZER-PIPELINE-001 REQ-APL-100: `run_market_inference()`는 이제
+`pipeline.run_market_inference()`를 호출하도록 교체됐다. `trade_date`는
+`trade_date.resolve_trade_date(engine, market)`로 이 함수 진입 전에
+산출한다(design.md §1, REQ-AIF-021 계승) — `None`이면(추론 대상 없음)
+파이프라인을 호출하지 않고 즉시 전조합스킵으로 종료한다.
 """
 
 import argparse
@@ -17,13 +17,18 @@ import sys
 
 from analyzer.common.logging import get_logger
 from analyzer.common.trace import new_trace_id
+from analyzer.data.config import get_db_config
+from analyzer.data.repository import build_engine
+from analyzer.inference.config import get_inference_config
 from analyzer.inference.outcome import InferenceOutcome, resolve_exit_code
+from analyzer.inference.pipeline import run_market_inference
+from analyzer.inference.trade_date import resolve_trade_date
 
 logger = get_logger(__name__)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """자식 CLI 인자를 파싱한다. `--market`은 필수다."""
+    """자식 CLI 인자를 파싱한다. `--market`은 필수, `--trace-id`는 선택이다."""
     parser = argparse.ArgumentParser(
         prog="analyzer.inference",
         description="시장 단위 완결형 추론 CLI(종료코드 0=성공/1=전조합스킵/2=부분실패).",
@@ -33,29 +38,43 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         required=True,
         help="대상 시장 식별자(domestic, overseas)",
     )
-    return parser.parse_args(argv)
-
-
-# @MX:TODO: [AUTO] 추론 파이프라인 본체(M2~M6) 배선 지점 — 현재는 처리 조합 0건을 반환한다.
-def run_market_inference(market: str) -> InferenceOutcome:
-    """`market`의 전 (horizon) 조합에 대해 추론을 수행하고 집계를 반환한다.
-
-    M2~M6이 매니페스트 해석 → 예측 → INSERT → 밴드 스윕 → 발행을 이 함수
-    안에 채운다. M1은 종료코드 계약면만 확정하므로 처리 조합 0건을 반환한다.
-    """
-    logger.info(
-        "inference pipeline not wired yet market=%s (SPEC-ANALYZER-INFER-001 M2~M6)",
-        market,
+    parser.add_argument(
+        "--trace-id",
+        dest="trace_id",
+        default=None,
+        help="부모가 이벤트 수신 시점에 생성한 trace_id(REQ-APL-111). 부재 시 자체 생성한다.",
     )
-    return InferenceOutcome(processed=0, skipped_combinations=0, partial_failures=0)
+    return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     """추론을 실행하고 종료코드 계약(0/1/2)에 따른 코드를 반환한다."""
     args = parse_args(argv)
-    trace_id = new_trace_id()
+    # design.md §4: 빈 문자열도 자체 생성 폴백과 동일하게 취급한다(falsy 값 통일).
+    trace_id = args.trace_id or new_trace_id()
 
-    outcome = run_market_inference(args.market)
+    engine = build_engine(get_db_config())
+    try:
+        trade_date = resolve_trade_date(engine, args.market)
+    finally:
+        engine.dispose()
+
+    if trade_date is None:
+        logger.info(
+            "추론 대상 거래일을 산출할 수 없다 market=%s trace_id=%s",
+            args.market,
+            trace_id,
+        )
+        outcome = InferenceOutcome(processed=0, skipped_combinations=0, partial_failures=0)
+    else:
+        inference_config = get_inference_config()
+        outcome = run_market_inference(
+            args.market,
+            trace_id=trace_id,
+            models_root=inference_config.container_models_root,
+            trade_date=trade_date,
+        )
+
     exit_code = resolve_exit_code(outcome)
 
     logger.info(
