@@ -62,10 +62,11 @@ class TestInferenceMetricsSkipCounter:
         assert no_manifest == 2.0
         assert sha_mismatch == 1.0
 
-    def test_all_six_skip_reasons_are_recordable(self):
-        """REQ-AIF-130 (a)가 열거한 6개 사유 레이블 전체가 기록 가능해야 한다 —
-        레이블 어휘는 `resolution.SkipReason`(M2/M3/M5/M6 산출)을 그대로
-        재사용한다(신규 문자열 도입 금지)."""
+    def test_all_seven_skip_reasons_are_recordable(self):
+        """REQ-AIF-130 (a)가 열거한 6개 사유 + SPEC-ANALYZER-PIPELINE-001
+        REQ-APL-103의 `UNEXPECTED_ERROR`(일반 예외 경계) 총 7개 레이블
+        전체가 기록 가능해야 한다 — 레이블 어휘는 `resolution.SkipReason`을
+        그대로 재사용한다(신규 문자열 도입 금지)."""
         registry = CollectorRegistry()
         metrics = InferenceMetrics(registry=registry)
 
@@ -76,6 +77,7 @@ class TestInferenceMetricsSkipCounter:
             "feature_insufficient",
             "degenerate_quantile",
             "manifest_race",
+            "unexpected_error",
         }
         assert {member.value for member in SkipReason} == expected
 
