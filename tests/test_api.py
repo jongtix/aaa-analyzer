@@ -13,10 +13,14 @@ asyncio 태스크로 기동하고 종료 경로에서 취소한다(컨슈머 자
 import asyncio
 from pathlib import Path
 
+import pytest
 from prometheus_client import CONTENT_TYPE_LATEST
+from prometheus_client import values as prometheus_values
 from starlette.testclient import TestClient
 
 from analyzer.api.app import create_app
+from analyzer.inference.metrics import INFERENCE_SKIP_TOTAL_NAME, InferenceMetrics
+from analyzer.inference.resolution import SkipReason
 from analyzer.orchestration.scheduler import SchedulerRegistry
 
 
@@ -44,6 +48,55 @@ class TestMetricsEndpoint:
         response = client.get("/metrics")
 
         assert response.headers["content-type"] == CONTENT_TYPE_LATEST
+
+
+class TestMetricsMultiprocessMode:
+    """SPEC-ANALYZER-PIPELINE-001 REQ-APL-131/AC-APL-131: `PROMETHEUS_
+    MULTIPROC_DIR`이 설정되면 `/metrics`는 `multiprocess.MultiProcessCollector`
+    로 여러 pid의 덤프 파일을 합산해 노출한다 — 미설정 시(로컬/CI 기본 경로)
+    기존 `generate_latest(REGISTRY)` 단일-프로세스 동작을 그대로 유지한다."""
+
+    def _write_pid_dump(self, tmp_path: Path, pid: int, skip_count: int) -> None:
+        from prometheus_client import CollectorRegistry
+
+        original_value_class = prometheus_values.ValueClass
+        try:
+            prometheus_values.ValueClass = prometheus_values.MultiProcessValue(
+                process_identifier=lambda: pid
+            )
+            registry = CollectorRegistry()
+            metrics = InferenceMetrics(registry=registry)
+            for _ in range(skip_count):
+                metrics.record_skip(market="domestic", horizon=20, reason=SkipReason.NO_MANIFEST)
+        finally:
+            prometheus_values.ValueClass = original_value_class
+
+    def test_aggregates_multiple_pid_dumps_when_env_var_set(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
+        self._write_pid_dump(tmp_path, pid=111, skip_count=3)
+        self._write_pid_dump(tmp_path, pid=222, skip_count=2)
+
+        client = TestClient(create_app())
+        response = client.get("/metrics")
+
+        assert response.status_code == 200
+        body = response.text
+        assert (
+            f'{INFERENCE_SKIP_TOTAL_NAME}{{horizon="20",market="domestic",'
+            'reason="no_manifest"} 5.0' in body
+        )
+
+    def test_falls_back_to_default_registry_when_env_var_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+        client = TestClient(create_app())
+
+        response = client.get("/metrics")
+
+        assert response.status_code == 200
 
 
 class TestMainEntrypoint:

@@ -285,6 +285,24 @@ class TestTrainingMetricsStalenessBatch:
         assert stale_gone is None
 
 
+class TestGaugeMultiprocessMode:
+    """SPEC-ANALYZER-PIPELINE-001 REQ-APL-132/AC-APL-132: `PROMETHEUS_
+    MULTIPROC_DIR`이 설정된 프로세스에서 `last_success_timestamp`/
+    `model_stale` Gauge가 (market,horizon,algorithm) 조합당 정확히 1개의
+    시계열만 노출하도록 `multiprocess_mode="max"`를 명시한다 — 기본값
+    `"all"`이 부수적으로 추가하는 pid 라벨을 방지한다."""
+
+    def test_last_success_timestamp_gauge_uses_max_multiprocess_mode(self):
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        assert metrics.last_success_timestamp._multiprocess_mode == "max"
+
+    def test_model_stale_gauge_uses_max_multiprocess_mode(self):
+        metrics = TrainingMetrics(registry=CollectorRegistry())
+
+        assert metrics.model_stale._multiprocess_mode == "max"
+
+
 class TestPrometheusScrapeSmoke:
     """§E Self-Verification: 로컬 `prometheus_client` 레지스트리 스크레이프 스모크 테스트."""
 

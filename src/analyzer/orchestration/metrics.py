@@ -54,12 +54,14 @@ class TrainingMetrics:
             "마지막 성공 학습 실행 Unix epoch 초",
             ["market", "horizon", "algorithm"],
             registry=target_registry,
+            multiprocess_mode="max",
         )
         self.model_stale = Gauge(
             MODEL_STALE_NAME,
             "모델 정체(staleness) 여부 (0=정상, 1=정체)",
             ["market", "horizon", "algorithm"],
             registry=target_registry,
+            multiprocess_mode="max",
         )
         self.rank_ic = Gauge(
             RANK_IC_NAME,
