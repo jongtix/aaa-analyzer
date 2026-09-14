@@ -11,6 +11,7 @@ asyncio 태스크로 기동하고 종료 경로에서 취소한다(컨슈머 자
 """
 
 import asyncio
+from pathlib import Path
 
 from prometheus_client import CONTENT_TYPE_LATEST
 from starlette.testclient import TestClient
@@ -123,6 +124,7 @@ class TestMainEntrypoint:
             redis_username="appuser",
             redis_password="redis-secret",
             stream_claim_idle_seconds=600,
+            container_models_root=Path("/mnt/models"),
         )
 
         monkeypatch.setattr(main, "get_automation_config", lambda: fake_config)

@@ -10,6 +10,7 @@ REQ-AIF-060: 인-플라이트 락으로 동일 (market, trade_date) 중복 스�
 import asyncio
 from collections.abc import Callable
 from datetime import date
+from pathlib import Path
 
 import pytest
 from redis.exceptions import ResponseError
@@ -35,6 +36,7 @@ def _config(idle_seconds: int = 600) -> InferenceConfig:
         redis_username="appuser",
         redis_password="redis-secret",
         stream_claim_idle_seconds=idle_seconds,
+        container_models_root=Path("/mnt/models"),
     )
 
 
