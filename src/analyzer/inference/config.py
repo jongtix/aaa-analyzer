@@ -15,6 +15,7 @@ XAUTOCLAIM/XADD) ACL 권한을 보유하는지에 대한 NAS 실측은 REQ-AIF-1
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from analyzer.data.config import MissingConfigError
 
@@ -51,6 +52,7 @@ _REQUIRED_ENV_VARS = (
     "REDIS_PORT",
     "REDIS_APPUSER_USERNAME",
     "REDIS_APPUSER_PASSWORD",
+    "TRAIN_AUTOMATION_CONTAINER_MODELS_ROOT",
 )
 
 _IDLE_SECONDS_ENV_VAR = "INFERENCE_STREAM_CLAIM_IDLE_SECONDS"
@@ -68,6 +70,13 @@ class InferenceConfig:
     stream_claim_idle_seconds: int
     """XAUTOCLAIM 재소유 임계(초). 인-플라이트 락 TTL로도 동일 값을 사용한다
     (REQ-AIF-060 — 자식이 비정상 종료했을 때 락이 TTL로 자연 해제되도록)."""
+
+    container_models_root: Path
+    """(SPEC-ANALYZER-PIPELINE-001 REQ-APL-120) 컨테이너 내부 활성 모델 루트
+    — `orchestration/config.py`의 `AutomationConfig.container_models_root`가
+    이미 소비하는 것과 동일한 환경변수(`TRAIN_AUTOMATION_CONTAINER_MODELS_ROOT`)
+    에서 읽는다. `AutomationConfig` 전체(SSH/WoL 등 추론과 무관한 필드)를
+    임포트/요구하지 않는다(자식 프로세스의 Lazy Load 원칙)."""
 
 
 def get_inference_config() -> InferenceConfig:
@@ -97,4 +106,5 @@ def get_inference_config() -> InferenceConfig:
         redis_username=os.environ["REDIS_APPUSER_USERNAME"],
         redis_password=os.environ["REDIS_APPUSER_PASSWORD"],
         stream_claim_idle_seconds=idle_seconds,
+        container_models_root=Path(os.environ["TRAIN_AUTOMATION_CONTAINER_MODELS_ROOT"]),
     )
