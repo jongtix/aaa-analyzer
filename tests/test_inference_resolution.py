@@ -416,6 +416,33 @@ class TestResolveLatestQuantileManifest:
         assert manifest is None
 
 
+class TestSkipReasonUnexpectedError:
+    """SPEC-ANALYZER-PIPELINE-001 AC-APL-103: 일반 예외 경계 전용 스킵
+    사유(가산적 확장) — 기존 6개 멤버의 문자열 값은 변경되지 않는다."""
+
+    def test_unexpected_error_member_exists_with_expected_value(self):
+        assert SkipReason.UNEXPECTED_ERROR == "unexpected_error"
+
+    def test_existing_six_members_are_unchanged(self):
+        assert SkipReason.NO_MANIFEST == "no_manifest"
+        assert SkipReason.SHA_MISMATCH == "sha_mismatch"
+        assert SkipReason.QUANTILE_MISSING == "quantile_missing"
+        assert SkipReason.DEGENERATE_QUANTILE == "degenerate_quantile"
+        assert SkipReason.FEATURE_INSUFFICIENT == "feature_insufficient"
+        assert SkipReason.MANIFEST_RACE == "manifest_race"
+
+    def test_seven_members_total(self):
+        assert {member.value for member in SkipReason} == {
+            "no_manifest",
+            "sha_mismatch",
+            "quantile_missing",
+            "feature_insufficient",
+            "degenerate_quantile",
+            "manifest_race",
+            "unexpected_error",
+        }
+
+
 class TestDetectManifestRace:
     """design.md §7, REQ-AIF-060 후반부(M6): 모델 로드 직후 매니페스트를
     재확인해 학습 잡과의 레이스를 감지한다(AC-AIF-011 레이스 시나리오)."""

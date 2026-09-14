@@ -8,9 +8,11 @@
 import asyncio
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
+from analyzer.inference import spawn as spawn_module
 from analyzer.inference.spawn import (
     EXIT_ALL_SKIPPED,
     EXIT_PARTIAL_FAILURE,
@@ -33,6 +35,21 @@ class TestDefaultChildArgv:
         argv = default_child_argv("domestic")
 
         assert argv == [sys.executable, "-m", "analyzer.inference", "--market", "domestic"]
+
+    def test_includes_trace_id_flag_when_provided(self):
+        """SPEC-ANALYZER-PIPELINE-001 REQ-APL-111: 부모가 생성한 trace_id를
+        자식 CLI 인자로 전파한다."""
+        argv = default_child_argv("domestic", trace_id="abc123")
+
+        assert argv == [
+            sys.executable,
+            "-m",
+            "analyzer.inference",
+            "--market",
+            "domestic",
+            "--trace-id",
+            "abc123",
+        ]
 
 
 class TestExitCodeContract:
@@ -81,6 +98,44 @@ class TestStdoutRelay:
 
         assert exit_code == EXIT_PARTIAL_FAILURE
         assert any('{"exit": 0}' in record.message for record in caplog.records)
+
+
+class TestMarkProcessDeadCleanup:
+    """SPEC-ANALYZER-PIPELINE-001 REQ-APL-133/AC-APL-133: 자식 종료 직후
+    `mark_process_dead(pid)`를 정확히 1회 호출한다 — `PROMETHEUS_MULTIPROC_DIR`
+    미설정 환경(로컬 테스트)에서 예외를 던지지 않는다(표준 무동작)."""
+
+    def test_mark_process_dead_is_called_with_child_pid(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
+        spy = MagicMock()
+        monkeypatch.setattr(spawn_module.multiprocess, "mark_process_dead", spy)
+
+        asyncio.run(
+            spawn_inference_child(
+                "domestic", trace_id="trace-pid", argv=_exiting_argv(EXIT_SUCCESS)
+            )
+        )
+
+        spy.assert_called_once()
+        (pid,), _kwargs = spy.call_args
+        assert isinstance(pid, int)
+
+    def test_no_exception_when_prometheus_multiproc_dir_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+
+        # 실제 prometheus_client.multiprocess.mark_process_dead()의 표준
+        # 무동작(대상 파일 없으면 조용히 통과) — 예외 없이 종료돼야 한다.
+        exit_code = asyncio.run(
+            spawn_inference_child(
+                "domestic", trace_id="trace-noop", argv=_exiting_argv(EXIT_SUCCESS)
+            )
+        )
+
+        assert exit_code == EXIT_SUCCESS
 
 
 class TestStaticIpcBoundary:

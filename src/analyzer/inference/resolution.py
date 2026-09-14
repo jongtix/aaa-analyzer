@@ -66,6 +66,11 @@ class SkipReason(StrEnum):
     모델 파일 load 사이에 `promote_activation_manifest()`가 개입해 파일이
     교체된 경우 — `detect_manifest_race()`가 로드 직후 재확인해 감지한다
     (REQ-AIF-060 후반부, design.md §7, M6)."""
+    UNEXPECTED_ERROR = "unexpected_error"
+    """(SPEC-ANALYZER-PIPELINE-001 REQ-APL-103) 파이프라인의 종목 단위 일반
+    예외 경계(REQ-APL-102)가 그 밖의 모든 예외를 흡수할 때 쓰는 스킵 사유 —
+    가산적 확장이며 다른 6개 사유는 각자의 기존 구체적 판정 지점에서만
+    반환된다."""
 
 
 @dataclass(frozen=True, slots=True)
