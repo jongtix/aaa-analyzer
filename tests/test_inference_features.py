@@ -217,6 +217,134 @@ class TestAssembleInferenceFeaturesBatchPartialFailure:
             assert len(results[code]) == 1
 
 
+class TestAssembleInferenceFeaturesBatchSupplyDemandGap:
+    """SPEC-ANALYZER-TRAIN-META-001 M7(REQ-TM-011, acceptance.md AC-TM-010/
+    AC-TM-010b): `assemble_inference_features_batch()`가 종목별로 M2의
+    `has_supply_demand_gap()`을 호출해 investor_trend 결측 + FROZEN 컬럼
+    요구 조합을 `SkipReason.FEATURE_INSUFFICIENT`로 조기 분류해야 한다.
+
+    `feature_columns` 키워드 인자가 생략되면(기본값 `None`) 이 가드는
+    완전히 비활성화되고 기존 동작을 그대로 유지한다(REQ-TM-006 방향의
+    회귀 최소화 원칙 — `TestAssembleInferenceFeaturesBatchPartialFailure`가
+    이 회귀 가드다)."""
+
+    def test_ac_tm_010_frozen_required_and_trend_empty_is_feature_insufficient(self):
+        """AC-TM-010: `feature_columns`에 FROZEN 수급 컬럼이 포함돼 있고
+        해당 종목의 investor_trend가 비어 있으면, 실제 피처 조립을
+        시도하지 않고 매핑 값을 `SkipReason.FEATURE_INSUFFICIENT`로
+        기록해야 한다(shall)."""
+        dates = _weekdays(date(2026, 1, 1), date(2026, 4, 1))
+        as_of_date = dates[-1]
+        calendar = _calendar(date(2025, 12, 1), date(2026, 4, 10))
+        engine = MagicMock()
+
+        with (
+            patch(
+                "analyzer.inference.features.fetch_daily_ohlcv", return_value=_ohlcv("OVS1", dates)
+            ),
+            patch(
+                "analyzer.inference.features.fetch_corporate_events", return_value=_empty_events()
+            ),
+            patch("analyzer.inference.features.fetch_investor_trend", return_value=_empty_trend()),
+        ):
+            results = assemble_inference_features_batch(
+                engine,
+                calendar,
+                ["OVS1"],
+                as_of_date,
+                feature_columns=["foreign_net_ratio", "ROC_60"],
+            )
+
+        assert results["OVS1"] is SkipReason.FEATURE_INSUFFICIENT
+
+    def test_ac_tm_010b_frozen_not_required_proceeds_to_normal_assembly(self):
+        """AC-TM-010b 취지(회귀 가드): `feature_columns`에 FROZEN 컬럼이
+        없으면(예: 사이드카가 해외 유니버스에 맞춰 이미 FROZEN을 제외한
+        경우) investor_trend 결측과 무관하게 정상 조립 경로로 진행해야
+        한다(shall not — 갭 가드가 이 경로를 가로채지 않는다)."""
+        dates = _weekdays(date(2026, 1, 1), date(2026, 4, 1))
+        as_of_date = dates[-1]
+        calendar = _calendar(date(2025, 12, 1), date(2026, 4, 10))
+        engine = MagicMock()
+
+        with (
+            patch(
+                "analyzer.inference.features.fetch_daily_ohlcv", return_value=_ohlcv("OVS2", dates)
+            ),
+            patch(
+                "analyzer.inference.features.fetch_corporate_events", return_value=_empty_events()
+            ),
+            patch("analyzer.inference.features.fetch_investor_trend", return_value=_empty_trend()),
+        ):
+            results = assemble_inference_features_batch(
+                engine,
+                calendar,
+                ["OVS2"],
+                as_of_date,
+                feature_columns=["ROC_60", "KMID"],
+            )
+
+        assert isinstance(results["OVS2"], pd.DataFrame)
+        assert len(results["OVS2"]) == 1
+
+    def test_trend_present_proceeds_to_normal_assembly_even_with_frozen_columns(self):
+        """FROZEN 컬럼이 필요해도 investor_trend가 실제로 존재하면 갭이
+        아니므로(shall not) 정상 조립 경로로 진행해야 한다 — 도메스틱
+        종목의 일반적인 케이스."""
+        dates = _weekdays(date(2026, 1, 1), date(2026, 4, 1))
+        as_of_date = dates[-1]
+        calendar = _calendar(date(2025, 12, 1), date(2026, 4, 10))
+        engine = MagicMock()
+
+        with (
+            patch(
+                "analyzer.inference.features.fetch_daily_ohlcv", return_value=_ohlcv("DOM1", dates)
+            ),
+            patch(
+                "analyzer.inference.features.fetch_corporate_events", return_value=_empty_events()
+            ),
+            patch(
+                "analyzer.inference.features.fetch_investor_trend",
+                return_value=_trend("DOM1", dates),
+            ),
+        ):
+            results = assemble_inference_features_batch(
+                engine,
+                calendar,
+                ["DOM1"],
+                as_of_date,
+                feature_columns=["foreign_net_ratio", "ROC_60"],
+            )
+
+        assert isinstance(results["DOM1"], pd.DataFrame)
+        assert len(results["DOM1"]) == 1
+        assert "foreign_net_ratio" in results["DOM1"].columns
+
+    def test_feature_columns_omitted_keeps_gate_disabled_regardless_of_trend(self):
+        """`feature_columns`가 생략되면(기본값 `None`) investor_trend가
+        비어 있어도 갭 가드가 아예 비활성화돼 기존 동작(정상 조립 시도)을
+        그대로 유지해야 한다(shall not skip) — REQ-TM-006 방향의 회귀
+        최소화 원칙과 동일 취지."""
+        dates = _weekdays(date(2026, 1, 1), date(2026, 4, 1))
+        as_of_date = dates[-1]
+        calendar = _calendar(date(2025, 12, 1), date(2026, 4, 10))
+        engine = MagicMock()
+
+        with (
+            patch(
+                "analyzer.inference.features.fetch_daily_ohlcv", return_value=_ohlcv("OVS3", dates)
+            ),
+            patch(
+                "analyzer.inference.features.fetch_corporate_events", return_value=_empty_events()
+            ),
+            patch("analyzer.inference.features.fetch_investor_trend", return_value=_empty_trend()),
+        ):
+            results = assemble_inference_features_batch(engine, calendar, ["OVS3"], as_of_date)
+
+        assert isinstance(results["OVS3"], pd.DataFrame)
+        assert len(results["OVS3"]) == 1
+
+
 class TestResolveFeatureColumns:
     """REQ-AIF-071(AC-AIF-013): 챔피언의 `.meta.json.feature_columns`를
     읽고, 사이드카가 없으면 FEATURE_REGISTRY 전체로 폴백한다."""
