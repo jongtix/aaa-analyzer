@@ -16,6 +16,8 @@ import time
 from datetime import date
 from pathlib import Path
 
+import pandas as pd
+
 from analyzer.common.logging import get_logger
 from analyzer.data.config import get_db_config
 from analyzer.data.repository import (
@@ -25,7 +27,7 @@ from analyzer.data.repository import (
 )
 from analyzer.inference.boundaries_store import load_grade_boundaries
 from analyzer.inference.config import get_inference_config
-from analyzer.inference.features import assemble_inference_features
+from analyzer.inference.features import assemble_inference_features_batch
 from analyzer.inference.metrics import InferenceMetrics
 from analyzer.inference.outcome import InferenceOutcome
 from analyzer.inference.predict import predict_point_models, predict_quantile_models
@@ -136,6 +138,16 @@ def run_market_inference(
         raw_universe = fetch_stock_universe(engine, market)  # REQ-APL-107: 시장당 1회
         universe = _filter_universe(raw_universe)
 
+        # 피처는 (stock_code, trade_date) 단위로 horizon-불변이므로, 실제로
+        # 처리할 조합이 하나라도 확인된 시점에 시장당 1회만 배치 조립해
+        # 캐싱한다 — horizon(현재 2개: 20/60)마다 유니버스를 재순회하며
+        # 종목당 DB 왕복 3회(OHLC/기업이벤트/투자자동향)를 중복 실행하지
+        # 않기 위함이다(sync-auditor 표준 리뷰 W1 발견 사항 반영). 모든
+        # 조합이 스킵되는 경우(NO_MANIFEST 등)에는 지연 평가로 인해 배치
+        # 조립 자체가 호출되지 않는다 — 기존 동작(0회 DB 조회)을 그대로
+        # 보존한다.
+        feature_cache: dict[str, pd.DataFrame | SkipReason] | None = None
+
         for horizon in HORIZONS:
             serving_plan = resolve_serving_targets(models_root, market, horizon)
             if isinstance(serving_plan, SkipReason):
@@ -157,14 +169,20 @@ def run_market_inference(
                 )
                 continue
 
+            if feature_cache is None:
+                feature_cache = assemble_inference_features_batch(
+                    engine, calendar, [stock_code for _, stock_code in universe], trade_date
+                )
+
             model_version = resolve_model_version(serving_plan)
             combo_had_stock_skip = False
 
             for stock_id, stock_code in universe:
                 try:
-                    features = assemble_inference_features(engine, calendar, stock_code, trade_date)
-                    if features is None:
-                        raise _SkippedStock(SkipReason.FEATURE_INSUFFICIENT)
+                    cached_features = feature_cache[stock_code]
+                    if isinstance(cached_features, SkipReason):
+                        raise _SkippedStock(cached_features)
+                    features = cached_features
 
                     predictions = predict_point_models(serving_plan, features)
                     score_cols = compute_score_columns(serving_plan.active_strategy, predictions)
