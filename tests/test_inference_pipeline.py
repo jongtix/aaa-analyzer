@@ -9,13 +9,14 @@ INSERT→발행→밴드 스윕 순서 계약)만 검증한다.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
 
+from analyzer.data.models import TradingCalendar
 from analyzer.inference import pipeline as pipeline_module
 from analyzer.inference.pipeline import (
     MARKET_CALENDAR_CODE,
@@ -24,7 +25,82 @@ from analyzer.inference.pipeline import (
     run_market_inference,
 )
 from analyzer.inference.resolution import ServingPlan, SkipReason
+from analyzer.inference.sweep import _union_feature_columns
 from analyzer.inference.writer import InsertOutcome
+
+
+def _weekdays(start: date, end: date) -> list[date]:
+    """`tests/test_inference_features.py`의 동명 헬퍼와 동일한 요일 필터 —
+    실제 DB 접속 없이 `assemble_inference_features_batch()`의 실제 조립
+    경로(모킹하지 않음)를 태우는 M7b 테스트 전용으로 이 파일에 독립
+    복제한다(cross-test-file import 결합 회피)."""
+    days: list[date] = []
+    current = start
+    while current <= end:
+        if current.weekday() < 5:
+            days.append(current)
+        current += timedelta(days=1)
+    return days
+
+
+def _calendar(start: date, end: date) -> TradingCalendar:
+    return TradingCalendar(calendar_code="TEST", trading_days=frozenset(_weekdays(start, end)))
+
+
+def _ohlcv(stock_code: str, dates: list[date]) -> pd.DataFrame:
+    n = len(dates)
+    return pd.DataFrame(
+        {
+            "stock_code": [stock_code] * n,
+            "trade_date": dates,
+            "open_price": [100.0 + i * 0.1 for i in range(n)],
+            "high_price": [101.0 + i * 0.1 for i in range(n)],
+            "low_price": [99.0 + i * 0.1 for i in range(n)],
+            "close_price": [100.5 + i * 0.1 for i in range(n)],
+            "volume": [1000 + i for i in range(n)],
+        }
+    )
+
+
+def _empty_events() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "event_type",
+            "event_date",
+            "stock_rate",
+            "cash_amount",
+            "event_subtype",
+            "ex_dividend_date",
+            "currency_code",
+        ]
+    )
+
+
+def _empty_trend() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "stock_code",
+            "trade_date",
+            "foreign_net_value",
+            "institution_net_value",
+            "individual_net_value",
+            "total_trading_value",
+        ]
+    )
+
+
+def _trend(stock_code: str, dates: list[date]) -> pd.DataFrame:
+    n = len(dates)
+    return pd.DataFrame(
+        {
+            "stock_code": [stock_code] * n,
+            "trade_date": dates,
+            "foreign_net_value": [1_000_000 + i * 100 for i in range(n)],
+            "institution_net_value": [-500_000 + i * 50 for i in range(n)],
+            "individual_net_value": [-500_000 - i * 50 for i in range(n)],
+            "total_trading_value": [10_000_000 + i * 1000 for i in range(n)],
+        }
+    )
 
 
 def _manifest(trained_date: date):
@@ -124,7 +200,7 @@ def _constant_batch(df: pd.DataFrame):
     시장당 1회만 호출됨을 가정하는 테스트에서 반환값 형태(`dict[str,
     DataFrame]`)만 맞추면 되는 경우에 사용한다."""
 
-    def _fake(engine, calendar, stock_codes, as_of_date):  # noqa: ANN001
+    def _fake(engine, calendar, stock_codes, as_of_date, **_kwargs):  # noqa: ANN001
         return {stock_code: df for stock_code in stock_codes}
 
     return _fake
@@ -257,7 +333,9 @@ class TestRunMarketInferenceStockLevelExceptionBoundary:
 
         monkeypatch.setattr(pipeline_module, "predict_point_models", _fake_predict_point_models)
 
-        def _fake_assemble_batch_with_raise(engine, calendar, stock_codes, as_of_date):  # noqa: ANN001
+        def _fake_assemble_batch_with_raise(  # noqa: ANN001
+            engine, calendar, stock_codes, as_of_date, **_kwargs
+        ):
             results: dict[str, object] = {}
             for stock_code in stock_codes:
                 if stock_code == "AAA":
@@ -476,7 +554,7 @@ class TestRunMarketInferenceUniverseFiltering:
             pipeline_module, "resolve_latest_quantile_manifest", lambda *_a, **_k: MagicMock()
         )
         batch_spy = MagicMock(
-            side_effect=lambda engine, calendar, stock_codes, as_of_date: {
+            side_effect=lambda engine, calendar, stock_codes, as_of_date, **_kwargs: {
                 stock_code: pd.DataFrame({"f1": [1.0]}) for stock_code in stock_codes
             }
         )
@@ -619,4 +697,191 @@ class TestAaaInfraIssue163Containment:
         from analyzer.inference.outcome import resolve_exit_code
 
         assert resolve_exit_code(outcome) in (0, 2)
+        assert outcome.partial_failures == 1
+
+
+class TestRunMarketInferencePassesFeatureColumnsToBatchAssembly:
+    """SPEC-ANALYZER-TRAIN-META-001 M7b(REQ-TM-011, AC-TM-010/AC-TM-010b):
+    호출부(`run_market_inference()`)가 M7이 `assemble_inference_features_
+    batch()`에 심어둔 opt-in `feature_columns` 가드를 실제로 활성화해야
+    한다 — M7의 함수 단위 테스트(`tests/test_inference_features.py`)만으로는
+    이 호출부 배선 누락을 검출할 수 없다(M7 스스로가 "함수 단위 방어는
+    맞았으나 pipeline.py 호출부는 손대지 않았다"는 블로커를 반환한 이유)."""
+
+    def test_ac_tm_010_frozen_gap_stock_is_feature_insufficient_not_unexpected_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Given: investor_trend가 비어 있고, 서빙 모델에 `.meta.json`
+        사이드카가 없어 `FEATURE_REGISTRY`(FROZEN 수급 컬럼 포함) 전체로
+        폴백하는 종목 1건.
+        When: `run_market_inference()`를 실행한다 — `assemble_inference_
+        features_batch()`/`predict_point_models()` 둘 다 모킹하지 않고
+        실제 조립·예측 경로를 그대로 태운다.
+        Then(수정 전=RED): 호출부가 `feature_columns`를 넘기지 않아 M7
+        가드가 비활성 상태로 남고, `predict.py::_select_feature_columns()`의
+        무방비 `ValueError`까지 도달해 `SkipReason.UNEXPECTED_ERROR`로
+        오분류된다.
+        Then(수정 후=GREEN): `feature_columns=_union_feature_columns(
+        serving_plan)`가 실전달되어 `has_supply_demand_gap()`이 조기
+        판별하고, `SkipReason.FEATURE_INSUFFICIENT`로 정확히 분류되며
+        `assemble_inference_features()`(따라서 `fetch_daily_ohlcv`)에는
+        도달조차 하지 않는다."""
+        dates = _weekdays(date(2026, 1, 1), date(2026, 4, 1))
+        trade_date = dates[-1]
+        universe_rows = [(1, "GAP1", "A", None)]
+        metrics = _patch_common(monkeypatch, universe_rows=universe_rows)
+        monkeypatch.setattr(
+            pipeline_module,
+            "fetch_market_calendar",
+            lambda *_a, **_k: _calendar(date(2025, 12, 1), date(2026, 4, 10)),
+        )
+
+        # 사이드카 없는 모델 경로 → resolve_feature_columns()가
+        # FEATURE_REGISTRY(FROZEN 컬럼 포함) 전체로 폴백한다.
+        serving_plan = _solo_serving_plan("domestic", 20, date(2026, 8, 1))
+        monkeypatch.setattr(
+            pipeline_module,
+            "resolve_serving_targets",
+            lambda models_root, market, horizon: (
+                serving_plan if horizon == 20 else SkipReason.NO_MANIFEST
+            ),
+        )
+        monkeypatch.setattr(
+            pipeline_module, "resolve_latest_quantile_manifest", lambda *_a, **_k: MagicMock()
+        )
+
+        ohlcv_fetch_calls: list[str] = []
+
+        def _tracking_fetch_daily_ohlcv(_engine, stock_code, **_kwargs):  # noqa: ANN001
+            ohlcv_fetch_calls.append(stock_code)
+            return _ohlcv(stock_code, dates)
+
+        monkeypatch.setattr(
+            "analyzer.inference.features.fetch_daily_ohlcv", _tracking_fetch_daily_ohlcv
+        )
+        monkeypatch.setattr(
+            "analyzer.inference.features.fetch_corporate_events",
+            lambda *_a, **_k: _empty_events(),
+        )
+        monkeypatch.setattr(
+            "analyzer.inference.features.fetch_investor_trend",
+            lambda *_a, **_k: _empty_trend(),
+        )
+        # predict_point_models/predict_quantile_models은 의도적으로 모킹하지
+        # 않는다 — 실제 predict.py의 무방비 ValueError 호출부가 방어되지
+        # 않으면 이 테스트가 RED로 실패해야 한다.
+
+        outcome = run_market_inference(
+            "domestic",
+            trace_id="trace-tm010",
+            models_root=Path("/models"),
+            trade_date=trade_date,
+        )
+
+        skip_reasons = {reason for (_m, _h, reason) in metrics.skip_calls}
+        assert SkipReason.FEATURE_INSUFFICIENT in skip_reasons, (
+            f"GAP1이 FEATURE_INSUFFICIENT로 분류되지 않았다 — 실제 skip_calls={metrics.skip_calls}"
+        )
+        assert SkipReason.UNEXPECTED_ERROR not in skip_reasons
+        # M7 가드가 조기에 스킵했다면 assemble_inference_features()(따라서
+        # fetch_daily_ohlcv)에는 도달조차 하지 않아야 한다.
+        assert ohlcv_fetch_calls == []
+        assert outcome.skipped_combinations == 1  # (domestic, 60)는 NO_MANIFEST
+        assert outcome.partial_failures == 1  # (domestic, 20)는 GAP1 스킵으로 부분실패
+
+    def test_call_site_passes_union_feature_columns_of_the_active_serving_plan(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """호출부가 `_union_feature_columns(serving_plan)`을 그대로
+        `feature_columns` 키워드 인자로 전달하는지 직접 검증한다 — 이전
+        루프 반복에서 남은 낡은(stale) `serving_plan`이 아니라 현재
+        (market, horizon) 조합에서 막 해석된 것이어야 한다."""
+        universe_rows = [(1, "AAA", "A", None)]
+        _patch_common(monkeypatch, universe_rows=universe_rows)
+
+        serving_plan = _solo_serving_plan("domestic", 20, date(2026, 8, 1))
+        monkeypatch.setattr(
+            pipeline_module,
+            "resolve_serving_targets",
+            lambda models_root, market, horizon: (
+                serving_plan if horizon == 20 else SkipReason.NO_MANIFEST
+            ),
+        )
+        monkeypatch.setattr(
+            pipeline_module, "resolve_latest_quantile_manifest", lambda *_a, **_k: MagicMock()
+        )
+        batch_spy = MagicMock(return_value={"AAA": pd.DataFrame({"f1": [1.0]})})
+        monkeypatch.setattr(pipeline_module, "assemble_inference_features_batch", batch_spy)
+        monkeypatch.setattr(
+            pipeline_module, "predict_point_models", lambda *_a, **_k: {"xgboost": 0.5}
+        )
+        monkeypatch.setattr(pipeline_module, "predict_quantile_models", lambda *_a: (0.1, 0.9))
+        monkeypatch.setattr(pipeline_module, "resolve_confidence_for_stock", lambda *_a, **_k: 0.8)
+        monkeypatch.setattr(
+            pipeline_module, "insert_trading_signal", lambda *_a, **_k: InsertOutcome.INSERTED
+        )
+        monkeypatch.setattr(pipeline_module, "publish_trading_signal", MagicMock())
+        monkeypatch.setattr(
+            pipeline_module, "sweep_and_write_price_bands", lambda **_k: {"PROMOTE": "inserted"}
+        )
+
+        run_market_inference(
+            "domestic",
+            trace_id="trace-tm010-wiring",
+            models_root=Path("/models"),
+            trade_date=date(2026, 9, 10),
+        )
+
+        batch_spy.assert_called_once()
+        expected_columns = _union_feature_columns(serving_plan)
+        assert batch_spy.call_args.kwargs.get("feature_columns") == expected_columns
+        assert len(expected_columns) > 0  # FEATURE_REGISTRY 폴백이 공집합이 아님을 확인
+
+    def test_ac_tm_010b_unrelated_missing_column_still_surfaces_as_unexpected_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """AC-TM-010b 회귀 가드: `feature_columns` 실배선이 `investor_trend`
+        결측과 무관한 진짜 컬럼 누락(REQ-APL-140 일반 예외 경계가 원래
+        처리하던 사례)까지 삼켜버리지 않아야 한다(shall not) — 새 조기
+        스킵 가드는 `has_supply_demand_gap()`의 FROZEN+trend.empty 조건에만
+        정확히 스코프돼 있으므로, investor_trend가 존재하는 종목에서
+        발생한 무관한 예외는 여전히 기존 `except Exception:` 일반 경계를
+        통해 `SkipReason.UNEXPECTED_ERROR`로 도달해야 한다."""
+        universe_rows = [(1, "AAA", "A", None)]
+        metrics = _patch_common(monkeypatch, universe_rows=universe_rows)
+
+        serving_plan = _solo_serving_plan("domestic", 20, date(2026, 8, 1))
+        monkeypatch.setattr(
+            pipeline_module,
+            "resolve_serving_targets",
+            lambda models_root, market, horizon: (
+                serving_plan if horizon == 20 else SkipReason.NO_MANIFEST
+            ),
+        )
+        monkeypatch.setattr(
+            pipeline_module, "resolve_latest_quantile_manifest", lambda *_a, **_k: MagicMock()
+        )
+        # investor_trend와 무관한 정상 피처 DataFrame — has_supply_demand_gap()
+        # 조기 스킵 가드가 절대 트리거되지 않는(비-FROZEN 결측) 시나리오다.
+        monkeypatch.setattr(
+            pipeline_module,
+            "assemble_inference_features_batch",
+            _constant_batch(pd.DataFrame({"f1": [1.0]})),
+        )
+
+        def _raise_unrelated_valueerror(*_a, **_k):
+            raise ValueError("예측에 필요한 피처 컬럼이 누락되었다: ['some_unrelated_col']")
+
+        monkeypatch.setattr(pipeline_module, "predict_point_models", _raise_unrelated_valueerror)
+
+        outcome = run_market_inference(
+            "domestic",
+            trace_id="trace-tm010b",
+            models_root=Path("/models"),
+            trade_date=date(2026, 9, 10),
+        )
+
+        skip_reasons = {reason for (_m, _h, reason) in metrics.skip_calls}
+        assert SkipReason.UNEXPECTED_ERROR in skip_reasons
+        assert SkipReason.FEATURE_INSUFFICIENT not in skip_reasons
         assert outcome.partial_failures == 1
