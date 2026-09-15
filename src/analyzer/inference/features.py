@@ -96,6 +96,8 @@ def assemble_inference_features_batch(
     calendar: TradingCalendar,
     stock_codes: Sequence[str],
     as_of_date: date,
+    *,
+    feature_columns: Sequence[str] | None = None,
 ) -> dict[str, pd.DataFrame | SkipReason]:
     """복수 종목에 대해 피처를 배치로 조립한다(REQ-AIF-060 전반부, AC-AIF-011).
 
@@ -103,9 +105,26 @@ def assemble_inference_features_batch(
     `SkipReason.FEATURE_INSUFFICIENT`로 표시하고, 나머지 종목은 정상
     처리를 계속한다 — 한 종목의 실패가 (시장,horizon) 조합 전체를
     abort시키지 않는다.
+
+    SPEC-ANALYZER-TRAIN-META-001 M7(REQ-TM-011) — `feature_columns`가
+    명시적으로 제공되면, 각 종목의 `investor_trend`를 먼저 조회해
+    `has_supply_demand_gap()`(M2)으로 조기 판별한다. 갭이 있으면(FROZEN
+    수급 컬럼 요구 + investor_trend 결측) 실제 피처 조립을 시도하지 않고
+    그 종목의 매핑 값을 `SkipReason.FEATURE_INSUFFICIENT`로 기록한다 —
+    `predict.py::_select_feature_columns()`의 무방비 `ValueError` 호출부에
+    도달하기 전에 스킵한다(`inference/sweep.py`의 기존 조기 스킵과 동일한
+    방어 수준, AC-TM-010). `feature_columns`가 생략되면(기본값 `None`) 이
+    가드는 완전히 비활성화되고 기존 동작을 그대로 유지한다 — 기존 호출자는
+    이 milestone으로 영향받지 않는다(REQ-TM-006 방향의 회귀 최소화 원칙과
+    동일 취지, AC-TM-010b).
     """
     results: dict[str, pd.DataFrame | SkipReason] = {}
     for stock_code in stock_codes:
+        if feature_columns is not None:
+            trend = fetch_investor_trend(engine, stock_code)
+            if has_supply_demand_gap(feature_columns, trend):
+                results[stock_code] = SkipReason.FEATURE_INSUFFICIENT
+                continue
         features = assemble_inference_features(engine, calendar, stock_code, as_of_date)
         results[stock_code] = features if features is not None else SkipReason.FEATURE_INSUFFICIENT
     return results
