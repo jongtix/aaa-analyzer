@@ -118,6 +118,18 @@ def _universe_df(rows: list[tuple[int, str, str, object]]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["stock_id", "stock_code", "grade", "delisted_at"])
 
 
+def _constant_batch(df: pd.DataFrame):
+    """모든 종목에 동일한 피처 DataFrame을 배정하는
+    `assemble_inference_features_batch` 대역 — horizon마다 재조립되지 않고
+    시장당 1회만 호출됨을 가정하는 테스트에서 반환값 형태(`dict[str,
+    DataFrame]`)만 맞추면 되는 경우에 사용한다."""
+
+    def _fake(engine, calendar, stock_codes, as_of_date):  # noqa: ANN001
+        return {stock_code: df for stock_code in stock_codes}
+
+    return _fake
+
+
 class _FakeMetrics:
     """`InferenceMetrics()`를 대체하는 스파이 — 프로세스당 인스턴스화 횟수와
     각 record_* 호출을 관측 가능하게 만든다(REQ-APL-106/134/150)."""
@@ -191,7 +203,7 @@ class TestRunMarketInferenceCombinationSkip:
             pipeline_module, "resolve_serving_targets", lambda *_a, **_k: SkipReason.NO_MANIFEST
         )
         assemble_spy = MagicMock()
-        monkeypatch.setattr(pipeline_module, "assemble_inference_features", assemble_spy)
+        monkeypatch.setattr(pipeline_module, "assemble_inference_features_batch", assemble_spy)
 
         outcome = run_market_inference(
             "domestic",
@@ -238,13 +250,6 @@ class TestRunMarketInferenceStockLevelExceptionBoundary:
             lambda *_a, **_k: MagicMock(),
         )
 
-        def _fake_assemble(engine, calendar, stock_code, as_of_date):  # noqa: ANN001
-            if stock_code == "AAA":
-                return None  # FEATURE_INSUFFICIENT
-            return pd.DataFrame({"f1": [1.0]})
-
-        monkeypatch.setattr(pipeline_module, "assemble_inference_features", _fake_assemble)
-
         def _fake_predict_point_models(serving_plan, features):  # noqa: ANN001
             if features is not None and "raise" in features.columns:
                 raise ValueError("피처 컬럼 누락")
@@ -252,15 +257,19 @@ class TestRunMarketInferenceStockLevelExceptionBoundary:
 
         monkeypatch.setattr(pipeline_module, "predict_point_models", _fake_predict_point_models)
 
-        def _fake_assemble_with_raise(engine, calendar, stock_code, as_of_date):  # noqa: ANN001
-            if stock_code == "AAA":
-                return None
-            if stock_code == "BBB":
-                return pd.DataFrame({"raise": [1.0]})
-            return pd.DataFrame({"f1": [1.0]})
+        def _fake_assemble_batch_with_raise(engine, calendar, stock_codes, as_of_date):  # noqa: ANN001
+            results: dict[str, object] = {}
+            for stock_code in stock_codes:
+                if stock_code == "AAA":
+                    results[stock_code] = SkipReason.FEATURE_INSUFFICIENT
+                elif stock_code == "BBB":
+                    results[stock_code] = pd.DataFrame({"raise": [1.0]})
+                else:
+                    results[stock_code] = pd.DataFrame({"f1": [1.0]})
+            return results
 
         monkeypatch.setattr(
-            pipeline_module, "assemble_inference_features", _fake_assemble_with_raise
+            pipeline_module, "assemble_inference_features_batch", _fake_assemble_batch_with_raise
         )
         monkeypatch.setattr(pipeline_module, "predict_quantile_models", lambda *_a: (0.1, 0.9))
         monkeypatch.setattr(pipeline_module, "resolve_confidence_for_stock", lambda *_a, **_k: 0.8)
@@ -312,8 +321,8 @@ class TestRunMarketInferencePublishAlwaysOnNormalReturn:
         )
         monkeypatch.setattr(
             pipeline_module,
-            "assemble_inference_features",
-            lambda *_a, **_k: pd.DataFrame({"f1": [1.0]}),
+            "assemble_inference_features_batch",
+            _constant_batch(pd.DataFrame({"f1": [1.0]})),
         )
         monkeypatch.setattr(
             pipeline_module, "predict_point_models", lambda *_a, **_k: {"xgboost": 0.5}
@@ -362,8 +371,8 @@ class TestRunMarketInferenceBandSweepDoesNotRollback:
         )
         monkeypatch.setattr(
             pipeline_module,
-            "assemble_inference_features",
-            lambda *_a, **_k: pd.DataFrame({"f1": [1.0]}),
+            "assemble_inference_features_batch",
+            _constant_batch(pd.DataFrame({"f1": [1.0]})),
         )
         monkeypatch.setattr(
             pipeline_module, "predict_point_models", lambda *_a, **_k: {"xgboost": 0.5}
@@ -411,8 +420,8 @@ class TestRunMarketInferenceSignalCounterNoDoubleCount:
         )
         monkeypatch.setattr(
             pipeline_module,
-            "assemble_inference_features",
-            lambda *_a, **_k: pd.DataFrame({"f1": [1.0]}),
+            "assemble_inference_features_batch",
+            _constant_batch(pd.DataFrame({"f1": [1.0]})),
         )
         monkeypatch.setattr(
             pipeline_module, "predict_point_models", lambda *_a, **_k: {"xgboost": 0.5}
@@ -466,13 +475,12 @@ class TestRunMarketInferenceUniverseFiltering:
         monkeypatch.setattr(
             pipeline_module, "resolve_latest_quantile_manifest", lambda *_a, **_k: MagicMock()
         )
-        processed_stock_codes: list[str] = []
-
-        def _fake_assemble(engine, calendar, stock_code, as_of_date):  # noqa: ANN001
-            processed_stock_codes.append(stock_code)
-            return pd.DataFrame({"f1": [1.0]})
-
-        monkeypatch.setattr(pipeline_module, "assemble_inference_features", _fake_assemble)
+        batch_spy = MagicMock(
+            side_effect=lambda engine, calendar, stock_codes, as_of_date: {
+                stock_code: pd.DataFrame({"f1": [1.0]}) for stock_code in stock_codes
+            }
+        )
+        monkeypatch.setattr(pipeline_module, "assemble_inference_features_batch", batch_spy)
         monkeypatch.setattr(
             pipeline_module, "predict_point_models", lambda *_a, **_k: {"xgboost": 0.5}
         )
@@ -493,9 +501,12 @@ class TestRunMarketInferenceUniverseFiltering:
             trade_date=date(2026, 9, 10),
         )
 
-        # A1/A2만 처리(grade A/B, 상장유지) — 두 horizon(20,60) × 2종목 = 4회
-        assert set(processed_stock_codes) == {"A1", "A2"}
+        # A1/A2만 처리(grade A/B, 상장유지)
         assert fetch_spy.call_count == 1  # 조합마다 반복되지 않고 시장당 1회
+        # W1: 배치 피처 조립도 horizon(20,60)마다가 아니라 시장당 정확히 1회만
+        # 호출되고, 그 1회에 필터링된 유니버스(A1/A2) 전체가 전달된다.
+        batch_spy.assert_called_once()
+        assert set(batch_spy.call_args.args[2]) == {"A1", "A2"}
 
 
 class TestRunMarketInferenceMetricsLifecycle:
@@ -584,8 +595,8 @@ class TestAaaInfraIssue163Containment:
         )
         monkeypatch.setattr(
             pipeline_module,
-            "assemble_inference_features",
-            lambda *_a, **_k: pd.DataFrame({"f1": [1.0]}),
+            "assemble_inference_features_batch",
+            _constant_batch(pd.DataFrame({"f1": [1.0]})),
         )
 
         def _raise_missing_feature_columns(*_a, **_k):
