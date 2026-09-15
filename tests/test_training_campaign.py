@@ -926,6 +926,102 @@ class TestChampionQuantilePersistence:
             q90_path, q90_path.with_suffix(q90_path.suffix + ".sha256")
         )
 
+    def test_champion_quantile_pair_receives_meta_json_sidecar(self, tmp_path: Path):
+        """AC-TM-003(SPEC-ANALYZER-TRAIN-META-001 M4): 캠페인 1차 배포
+        경로에서 저장되는 분위수(q10/q90) 모델도 `.meta.json` 사이드카를
+        받아야 하며, 그 `feature_columns`는 같은 조합의 포인트 모델
+        사이드카(`activate_market_horizon_combo()` 경로, REQ-TM-006 무수정
+        대상)와 정확히 일치해야 한다(대칭화, research.md §6-2 재현 시나리오
+        — 구현 전에는 분위수 사이드카가 존재하지 않는다, RED)."""
+        panel = _make_synthetic_panel(n_dates=520)
+        n_folds = 52
+        initial_train_end_idx = 200
+        records = _crafted_fold_records(n_folds, lgbm_mean=-0.10, xgb_mean=0.20)
+        frozen_params_by_algorithm = {
+            "lightgbm": {"n_estimators": 5},
+            "xgboost": {"n_estimators": 5},
+        }
+        models_root = tmp_path / "models"
+        trained_date = date(2026, 8, 19)
+
+        outcome = campaign_module.activate_market_horizon_combo(
+            panel=panel,
+            market="domestic",
+            horizon=20,
+            fold_records=records,
+            jsonl_dir=models_root / "domestic" / "20",
+            models_root=models_root,
+            initial_train_end_idx=initial_train_end_idx,
+            n_folds=n_folds,
+            frozen_params_by_algorithm=frozen_params_by_algorithm,
+            trained_date=trained_date,
+        )
+        assert outcome.persisted_algorithms == ("xgboost",)
+
+        point_model_path = campaign_module.persistence_module.model_dir(
+            models_root, "domestic", 20, "xgboost"
+        ) / campaign_module.persistence_module.model_filename(
+            "domestic", 20, "xgboost", trained_date
+        )
+        point_sidecar_path = campaign_module.campaign_metrics.sidecar_path_for(point_model_path)
+        assert point_sidecar_path.is_file(), (
+            "포인트 모델 사이드카는 REQ-TM-006 대상으로 무수정이어야 한다"
+        )
+        point_payload = json.loads(point_sidecar_path.read_text(encoding="utf-8"))
+
+        q10_path, q90_path = self._persisted_quantile_paths(
+            models_root, "domestic", 20, trained_date
+        )
+        for quantile_path in (q10_path, q90_path):
+            sidecar_path = campaign_module.campaign_metrics.sidecar_path_for(quantile_path)
+            assert sidecar_path.is_file(), (
+                f"분위수 모델({quantile_path.name}) .meta.json 사이드카가 기록되어야 한다"
+            )
+            payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+            assert payload["feature_columns"] == point_payload["feature_columns"]
+
+    def test_champion_quantile_pair_sidecar_omits_campaign_fold_aggregate_fields(
+        self, tmp_path: Path
+    ):
+        """REQ-TM-005: 분위수 모델은 캠페인 폴드 백테스트로 평가된 적이
+        없으므로(포인트 모델만 폴드를 거친다) 그 사이드카는 포인트 모델
+        전용 폴드 집계 필드(`aggregate_metrics`/`fold_metrics_jsonl`/
+        `final_fold_train_row_count`)를 포함하지 않아야 한다 — 가짜 값으로
+        채우지 않는다(B2)."""
+        panel = _make_synthetic_panel(n_dates=520)
+        n_folds = 52
+        initial_train_end_idx = 200
+        records = _crafted_fold_records(n_folds, lgbm_mean=0.20, xgb_mean=-0.10)
+        frozen_params_by_algorithm = {
+            "lightgbm": {"n_estimators": 5},
+            "xgboost": {"n_estimators": 5},
+        }
+        models_root = tmp_path / "models"
+        trained_date = date(2026, 8, 17)
+
+        campaign_module.activate_market_horizon_combo(
+            panel=panel,
+            market="domestic",
+            horizon=20,
+            fold_records=records,
+            jsonl_dir=models_root / "domestic" / "20",
+            models_root=models_root,
+            initial_train_end_idx=initial_train_end_idx,
+            n_folds=n_folds,
+            frozen_params_by_algorithm=frozen_params_by_algorithm,
+            trained_date=trained_date,
+        )
+
+        q10_path, _q90_path = self._persisted_quantile_paths(
+            models_root, "domestic", 20, trained_date
+        )
+        sidecar_path = campaign_module.campaign_metrics.sidecar_path_for(q10_path)
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        assert "aggregate_metrics" not in payload
+        assert "fold_metrics_jsonl" not in payload
+        assert "final_fold_train_row_count" not in payload
+        assert payload.get("frozen_hyperparameters") == {"n_estimators": 5}
+
     def test_champion_lightgbm_persists_quantile_pair_exactly_once(self, tmp_path: Path):
         """챔피언이 lightgbm이면(`algorithms_to_persist`가 이미 "lightgbm"을
         포함) 분위수 보조 모델 쌍이 정확히 1회만 저장되어야 한다 — 조합당
@@ -1035,3 +1131,34 @@ class TestTrainAndPersistChampionQuantiles:
             campaign_module.persistence_module.model_dir(models_root, "domestic", 20, "lightgbm")
             == q10_saved.model_path.parent
         )
+
+    def test_persisted_quantile_models_receive_meta_json_sidecar_with_feature_columns(
+        self, tmp_path: Path
+    ):
+        """AC-TM-003(SPEC-ANALYZER-TRAIN-META-001 M4): 함수 단위로도
+        q10/q90 각각에 `.meta.json`이 기록되고, `feature_columns`가
+        `_split_features_and_labels()` 산출(`["KMID"]`)과 정확히 일치해야
+        한다 — 구현 전에는 어떤 경로에서도 사이드카가 존재하지 않는다
+        (research.md §3, RED)."""
+        panel = _make_synthetic_panel(n_dates=520)
+        models_root = tmp_path / "models"
+        trained_date = date(2026, 8, 19)
+
+        q10_saved, q90_saved = campaign_module.train_and_persist_champion_quantiles(
+            panel,
+            "domestic",
+            20,
+            initial_train_end_idx=200,
+            n_folds=52,
+            frozen_lgbm_params={"n_estimators": 5},
+            models_root=models_root,
+            trained_date=trained_date,
+        )
+
+        for saved in (q10_saved, q90_saved):
+            sidecar_path = campaign_module.campaign_metrics.sidecar_path_for(saved.model_path)
+            assert sidecar_path.is_file(), (
+                f"분위수 모델({saved.model_path.name}) .meta.json 사이드카가 기록되어야 한다"
+            )
+            payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+            assert payload["feature_columns"] == ["KMID"]
