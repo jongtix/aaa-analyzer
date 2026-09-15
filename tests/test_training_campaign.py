@@ -792,6 +792,105 @@ class TestActivateMarketHorizonComboDeploymentBranch:
         ).exists()
 
 
+class TestReqTm006CampaignPointModelSidecarSchemaLock:
+    """SPEC-ANALYZER-TRAIN-META-001 M6: REQ-TM-006 회귀 가드 전용 고정 테스트.
+
+    `activate_market_horizon_combo()`가 기록하는 캠페인 포인트 모델
+    `.meta.json` 사이드카의 **정확한 최상위 키 집합**과 각 값의 **구조적
+    타입**(스냅샷 형태)을 고정한다 — M1(REQ-TM-005 축소 스키마의 Optional
+    인자 도입)이 이 FULL 스키마 캠페인 경로의 실제 출력 형태를 바꾸지
+    않았음을 증명하는 독립적인 첫 번째 테스트다.
+
+    `TestActivateMarketHorizonComboDeploymentBranch.
+    test_deployment_success_path_persists_model_and_manifests()`가 이미
+    동일 경로에 부수적으로 4개 키 존재 여부(`in` 단언)를 검사하지만, 그
+    테스트의 주 목적은 배포 분기 자체(모델 저장+매니페스트)의 실행
+    확인이다. 이 테스트는 그와 달리 사이드카 스키마 **하나만**을 목적으로
+    삼는 전용 락(lock) 테스트이며, 다음 두 가지를 추가로 검증해 위
+    부수 assertion보다 엄격하다:
+
+    1. 최상위 키 집합이 정확히 일치(초과 키도 회귀로 간주 — `==` 비교,
+       `in`이 아님).
+    2. 각 값의 구조적 타입(리스트/딕셔너리/스칼라 타입)까지 고정.
+
+    이 테스트는 독립 실행 가능하며(표준 pytest fixture만 사용, 모듈
+    레벨 순서 의존 없음) 어떤 다른 테스트의 side effect에도 의존하지
+    않는다.
+    """
+
+    def test_req_tm_006_campaign_point_model_sidecar_schema_unchanged(self, tmp_path: Path) -> None:
+        panel = _make_synthetic_panel(n_dates=520)
+        n_folds = 52
+        initial_train_end_idx = 200
+        records = _crafted_fold_records(n_folds)
+        frozen_params_by_algorithm = {
+            "lightgbm": {"n_estimators": 5},
+            "xgboost": {"n_estimators": 5},
+        }
+        models_root = tmp_path / "models"
+        jsonl_dir = models_root / "domestic" / "20"
+
+        campaign_module.activate_market_horizon_combo(
+            panel=panel,
+            market="domestic",
+            horizon=20,
+            fold_records=records,
+            jsonl_dir=jsonl_dir,
+            models_root=models_root,
+            initial_train_end_idx=initial_train_end_idx,
+            n_folds=n_folds,
+            frozen_params_by_algorithm=frozen_params_by_algorithm,
+            trained_date=date(2026, 8, 17),
+        )
+
+        model_dir = campaign_module.persistence_module.model_dir(
+            models_root, "domestic", 20, "lightgbm"
+        )
+        model_filename = campaign_module.persistence_module.model_filename(
+            "domestic", 20, "lightgbm", date(2026, 8, 17)
+        )
+        model_path = model_dir / model_filename
+        sidecar_path = campaign_module.campaign_metrics.sidecar_path_for(model_path)
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+
+        # REQ-TM-006 락: 캠페인 포인트 모델 경로의 최상위 키 집합은
+        # M1 이전(FULL 스키마)과 정확히 동일해야 한다 — 초과도 누락도 회귀다.
+        assert set(payload.keys()) == {
+            "market",
+            "horizon",
+            "algorithm",
+            "feature_columns",
+            "aggregate_metrics",
+            "final_fold_train_row_count",
+            "frozen_hyperparameters",
+            "fold_metrics_jsonl",
+        }
+
+        # 구조적 타입(값 자체가 아니라 형태) 고정 — REQ-TM-005 축소 스키마의
+        # Optional 파라미터 도입이 FULL 경로의 타입 계약을 바꾸지 않았음을
+        # 확인한다.
+        assert isinstance(payload["market"], str)
+        assert isinstance(payload["horizon"], int)
+        assert isinstance(payload["algorithm"], str)
+        assert isinstance(payload["feature_columns"], list)
+        assert all(isinstance(column, str) for column in payload["feature_columns"])
+        assert isinstance(payload["final_fold_train_row_count"], int)
+        assert isinstance(payload["frozen_hyperparameters"], dict)
+        assert isinstance(payload["fold_metrics_jsonl"], str)
+
+        aggregate_metrics = payload["aggregate_metrics"]
+        assert isinstance(aggregate_metrics, dict)
+        assert set(aggregate_metrics.keys()) == {
+            "mean_rank_ic",
+            "stddev_rank_ic",
+            "icir",
+        }
+        assert all(
+            isinstance(aggregate_metrics[key], float)
+            for key in ("mean_rank_ic", "stddev_rank_ic", "icir")
+        )
+
+
 class TestRunWalkForwardCampaignAndActivateEntrypoint:
     """sync-auditor BLOCKING 결함 수정: 최상위 진입점
     `run_walk_forward_campaign_and_activate()`(M6 Part 0) 자체가 실제로
