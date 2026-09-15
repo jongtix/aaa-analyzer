@@ -32,7 +32,7 @@ import argparse
 import json
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -54,6 +54,7 @@ from analyzer.data.repository import (
 )
 from analyzer.features.classification import FEATURE_REGISTRY
 from analyzer.training import cache as cache_module
+from analyzer.training import campaign_metrics
 from analyzer.training import dataset as dataset_module
 from analyzer.training import persistence as persistence_module
 from analyzer.training.db import build_trainer_engine
@@ -270,10 +271,26 @@ def _persist_trained_models(
     saved_paths: list[Path],
     saved_combos: list[tuple[str, int, str]],
     seen_combos: set[tuple[str, int, str]],
+    feature_columns_by_market_horizon: Mapping[tuple[str, int], Sequence[str]],
+    frozen_params_by_combo: Mapping[tuple[str, int, str], Mapping[str, object]] | None = None,
 ) -> None:
     """`trained_models`를 저장하고 `saved_paths`/`saved_combos`/`seen_combos`에
     누적한다 — `run_training_pipeline()`의 저장 루프를 추출한 헬퍼(REQ-ATG-011
-    그룹별 반복 호출과 기존 단일 호출 양쪽이 공유한다, 동작 불변 리팩터)."""
+    그룹별 반복 호출과 기존 단일 호출 양쪽이 공유한다, 동작 불변 리팩터).
+
+    SPEC-ANALYZER-TRAIN-META-001 M3(REQ-TM-001/002/003/004): 저장 직후
+    `campaign_metrics.write_sidecar_metadata()`의 축소 스키마(M1)로
+    `.meta.json` 사이드카를 기록한다 — 포인트 모델과 분위수 모델 모두
+    대상이다(이전에는 이 저장 경로 어디에도 사이드카 WRITER가 배선되어
+    있지 않았다, research.md §3.3). `feature_columns_by_market_horizon`는
+    `run_training_pipeline()`이 `_split_features_and_labels()`로 이미
+    계산한 (market, horizon)별 목록을 그대로 재사용한다(계산 로직 재구현
+    없음). `frozen_params_by_combo`에 해당 (market, horizon, algorithm)
+    조합이 있으면 `frozen_hyperparameters`로 함께 기록하고, 없으면
+    생략한다(가짜 값으로 채우지 않는다, REQ-TM-004/B2) — 분위수 모델은
+    `_resolve_algorithm()`이 포인트 LightGBM과 동일하게 "lightgbm"으로
+    해석하므로 같은 조합의 포인트 모델과 동일한 동결 파라미터를 공유한다.
+    """
     for model_key, model in trained_models.items():
         market, horizon = model_key[0], model_key[1]
         tag = model_key[2]
@@ -300,6 +317,18 @@ def _persist_trained_models(
         if combo not in seen_combos:
             seen_combos.add(combo)
             saved_combos.append(combo)
+
+        frozen_hyperparameters = (
+            frozen_params_by_combo.get(combo) if frozen_params_by_combo is not None else None
+        )
+        campaign_metrics.write_sidecar_metadata(
+            saved.model_path,
+            market=market,
+            horizon=horizon,
+            algorithm=algorithm,
+            feature_columns=feature_columns_by_market_horizon[(market, horizon)],
+            frozen_hyperparameters=frozen_hyperparameters,
+        )
 
 
 def _params_group_key(params: Mapping[str, object] | None) -> str:
@@ -341,6 +370,7 @@ def run_training_pipeline(
     """
     try:
         data_by_combo: dict[tuple[str, int], tuple[np.ndarray, np.ndarray]] = {}
+        feature_columns_by_market_horizon: dict[tuple[str, int], list[str]] = {}
         for market in MARKETS:
             market_calendar_code = _MARKET_CALENDAR_CODE_OVERRIDE.get(market, calendar_code)
             calendar = fetch_market_calendar(trainer_engine, market_calendar_code)
@@ -348,7 +378,7 @@ def run_training_pipeline(
                 trainer_engine, calendar, market, cache_dir, data_as_of, feature_code_version
             )
             for horizon in HORIZONS:
-                _feature_columns, x, y = _split_features_and_labels(assembled, horizon)
+                feature_columns, x, y = _split_features_and_labels(assembled, horizon)
                 # REQ-ATO-018: horizon별 유효 레이블 행수 단계 전이 로그.
                 logger.info(
                     "valid label rows market=%s horizon=%s rows=%d",
@@ -358,6 +388,12 @@ def run_training_pipeline(
                     extra={"stage_marker": True},
                 )
                 data_by_combo[(market, horizon)] = (x.to_numpy(), y.to_numpy())
+                # SPEC-ANALYZER-TRAIN-META-001 M3(REQ-TM-001/002): 이미 여기서
+                # 정확하게(해외는 FROZEN 수급 피처 자동 제외) 계산된
+                # feature_columns를 버리지 않고 저장해 _persist_trained_models()
+                # 사이드카 기록에 재사용한다(research.md §3.3 — 이전에는 여기서
+                # 유실되었다).
+                feature_columns_by_market_horizon[(market, horizon)] = feature_columns
 
         saved_paths: list[Path] = []
         saved_combos: list[tuple[str, int, str]] = []
@@ -368,7 +404,14 @@ def run_training_pipeline(
                 data_by_combo, lgbm_params=lgbm_params, xgb_params=xgb_params
             )
             _persist_trained_models(
-                trained_models, models_root, data_as_of, saved_paths, saved_combos, seen_combos
+                trained_models,
+                models_root,
+                data_as_of,
+                saved_paths,
+                saved_combos,
+                seen_combos,
+                feature_columns_by_market_horizon,
+                frozen_params_by_combo,
             )
         else:
             groups: dict[tuple[str, str], list[tuple[str, int]]] = {}
@@ -399,7 +442,14 @@ def run_training_pipeline(
                     if (model_key[0], model_key[1]) in owned
                 }
                 _persist_trained_models(
-                    filtered, models_root, data_as_of, saved_paths, saved_combos, seen_combos
+                    filtered,
+                    models_root,
+                    data_as_of,
+                    saved_paths,
+                    saved_combos,
+                    seen_combos,
+                    feature_columns_by_market_horizon,
+                    frozen_params_by_combo,
                 )
 
         return TrainingPipelineResult(
