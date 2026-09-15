@@ -8,6 +8,7 @@ Mapping/p10·p90 튜플)을 그대로 만족하는지 검증한다.
 """
 
 import json
+from datetime import date
 from pathlib import Path
 
 import lightgbm as lgb
@@ -23,10 +24,37 @@ from analyzer.inference.predict import (
 from analyzer.inference.resolution import (
     QuantileManifest,
     ServingPlan,
+    SkipReason,
     compute_score_columns,
 )
 from analyzer.inference.scoring import resolve_confidence_for_stock
 from analyzer.training.campaign_metrics import sidecar_path_for
+
+
+def _empty_trend() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "stock_code",
+            "trade_date",
+            "foreign_net_value",
+            "institution_net_value",
+            "individual_net_value",
+            "total_trading_value",
+        ]
+    )
+
+
+def _trend(stock_code: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "stock_code": [stock_code],
+            "trade_date": [date(2026, 1, 5)],
+            "foreign_net_value": [1_000_000],
+            "institution_net_value": [-500_000],
+            "individual_net_value": [-500_000],
+            "total_trading_value": [10_000_000],
+        }
+    )
 
 
 def _write_sidecar(model_path: Path, feature_columns: list[str]) -> None:
@@ -309,6 +337,145 @@ class TestPredictQuantileModels:
         feature_row = _feature_row(list(dict.fromkeys(p10_columns + p90_columns)))
 
         p10, p90 = predict_quantile_models(manifest, feature_row)
+
+        assert isinstance(p10, float)
+        assert isinstance(p90, float)
+
+
+class TestPredictPointModelsSupplyDemandGapGuard:
+    """SPEC-ANALYZER-TRAIN-META-001 M5(REQ-TM-007/008, plan.md §E M5,
+    research.md §6-3): 단일종목 스코어링 경로(`predict_point_models()`)에도
+    `inference/sweep.py`와 동일한 조기 스킵 방어를 제공한다 — `investor_trend`가
+    결측인데 FROZEN 수급 피처가 필요하면 `_select_feature_columns()`의
+    무방비 `ValueError` 대신 `SkipReason.FEATURE_INSUFFICIENT`를 반환한다.
+
+    `investor_trend` 키워드 인자는 생략 시(기본값 `None`) 기존 동작을 완전히
+    보존한다 — `pipeline.py` 등 기존 호출자는 이 milestone으로 영향받지
+    않는다(REQ-TM-006 방향의 회귀 최소화 원칙과 동일 취지 — 실제 프로덕션
+    오케스트레이션 배선은 INFER-001 M9 Gap 소관으로 이 SPEC의 범위 밖이다)."""
+
+    def test_investor_trend_omitted_preserves_existing_behavior(self, tmp_path: Path):
+        """회귀 가드: `investor_trend` 인자 없이 호출하면 FROZEN 컬럼이
+        feature_row에 없을 때 여전히 무방비 `ValueError`가 발생해야 한다
+        (기존 동작 완전 보존, REQ-TM-006 방향과 동일 취지)."""
+        feature_columns = ["foreign_net_ratio", "ROC_60"]
+        lgbm_path = _train_lightgbm(tmp_path, "lgbm_gap_omitted", feature_columns, seed=30)
+        plan = _serving_plan("lightgbm", {"lightgbm": lgbm_path})
+        # investor_trend 결측 상황을 흉내낸 feature_row — FROZEN 컬럼 없음.
+        feature_row = _feature_row(["ROC_60"])
+
+        try:
+            predict_point_models(plan, feature_row)
+            raise AssertionError("investor_trend 미지정 시 기존 ValueError가 발생해야 한다")
+        except ValueError as exc:
+            assert "foreign_net_ratio" in str(exc)
+
+    def test_empty_investor_trend_with_frozen_requirement_routes_to_skip_reason(
+        self, tmp_path: Path
+    ):
+        """재현(RED→GREEN, research.md §6-3): `investor_trend`가 명시적으로
+        제공되고 비어 있으며 feature_columns가 FROZEN 컬럼을 요구하면
+        `ValueError` 대신 `SkipReason.FEATURE_INSUFFICIENT`로 라우팅해야
+        한다(REQ-TM-007)."""
+        feature_columns = ["foreign_net_ratio", "ROC_60"]
+        lgbm_path = _train_lightgbm(tmp_path, "lgbm_gap_skip", feature_columns, seed=31)
+        plan = _serving_plan("lightgbm", {"lightgbm": lgbm_path})
+        # investor_trend 결측이므로 FROZEN 컬럼이 조립되지 않은 상태 재현.
+        feature_row = _feature_row(["ROC_60"])
+
+        result = predict_point_models(plan, feature_row, investor_trend=_empty_trend())
+
+        assert result is SkipReason.FEATURE_INSUFFICIENT
+
+    def test_non_empty_investor_trend_still_predicts_normally(self, tmp_path: Path):
+        """회귀 가드: `investor_trend`가 존재하면(도메스틱처럼) 갭이 아니므로
+        기존과 동일하게 정상 예측을 수행해야 한다."""
+        feature_columns = ["foreign_net_ratio", "ROC_60"]
+        lgbm_path = _train_lightgbm(tmp_path, "lgbm_gap_present", feature_columns, seed=32)
+        plan = _serving_plan("lightgbm", {"lightgbm": lgbm_path})
+        feature_row = _feature_row(feature_columns)
+
+        predictions = predict_point_models(plan, feature_row, investor_trend=_trend("A1"))
+
+        assert isinstance(predictions, dict)
+        assert set(predictions.keys()) == {"lightgbm"}
+        assert isinstance(predictions["lightgbm"], float)
+
+    def test_genuinely_missing_non_frozen_column_still_raises_value_error(self, tmp_path: Path):
+        """REQ-TM-008 회귀 가드: `investor_trend`가 제공되고 비어 있어도,
+        누락된 컬럼이 FROZEN이 아닌 진짜 예상 밖 컬럼 누락이면 기존
+        `ValueError` 가드가 여전히 발동해야 한다 — 신규 스킵 가드가 이
+        경로를 가로채지 않는다."""
+        feature_columns = ["ROC_60", "MA_60"]
+        lgbm_path = _train_lightgbm(tmp_path, "lgbm_genuine_missing", feature_columns, seed=33)
+        plan = _serving_plan("lightgbm", {"lightgbm": lgbm_path})
+        # MA_60이 빠진 피처 행 — FROZEN과 무관한 진짜 컬럼 누락.
+        feature_row = _feature_row(["ROC_60"])
+
+        try:
+            predict_point_models(plan, feature_row, investor_trend=_empty_trend())
+            raise AssertionError("FROZEN과 무관한 컬럼 누락은 여전히 ValueError여야 한다")
+        except ValueError as exc:
+            assert "MA_60" in str(exc)
+
+
+class TestPredictQuantileModelsSupplyDemandGapGuard:
+    """`predict_quantile_models()`에도 동일한 조기 스킵 방어를 제공한다
+    (REQ-TM-007/008) — p10/p90 두 모델 중 하나라도 FROZEN 컬럼을 요구하고
+    `investor_trend`가 결측이면 스킵한다."""
+
+    def test_empty_investor_trend_with_frozen_requirement_routes_to_skip_reason(
+        self, tmp_path: Path
+    ):
+        feature_columns = ["foreign_net_ratio", "ROC_60"]
+        p10_path = _train_lightgbm(tmp_path, "q10_gap_skip", feature_columns, seed=34)
+        p90_path = _train_lightgbm(tmp_path, "q90_gap_skip", feature_columns, seed=35)
+        manifest = QuantileManifest(
+            market="overseas",
+            horizon=20,
+            trained_date=date(2026, 9, 5),
+            p10_path=p10_path,
+            p90_path=p90_path,
+        )
+        feature_row = _feature_row(["ROC_60"])
+
+        result = predict_quantile_models(manifest, feature_row, investor_trend=_empty_trend())
+
+        assert result is SkipReason.FEATURE_INSUFFICIENT
+
+    def test_investor_trend_omitted_preserves_existing_behavior(self, tmp_path: Path):
+        feature_columns = ["foreign_net_ratio", "ROC_60"]
+        p10_path = _train_lightgbm(tmp_path, "q10_gap_omitted", feature_columns, seed=36)
+        p90_path = _train_lightgbm(tmp_path, "q90_gap_omitted", feature_columns, seed=37)
+        manifest = QuantileManifest(
+            market="overseas",
+            horizon=20,
+            trained_date=date(2026, 9, 5),
+            p10_path=p10_path,
+            p90_path=p90_path,
+        )
+        feature_row = _feature_row(["ROC_60"])
+
+        try:
+            predict_quantile_models(manifest, feature_row)
+            raise AssertionError("investor_trend 미지정 시 기존 ValueError가 발생해야 한다")
+        except ValueError as exc:
+            assert "foreign_net_ratio" in str(exc)
+
+    def test_non_empty_investor_trend_still_predicts_normally(self, tmp_path: Path):
+        feature_columns = ["foreign_net_ratio", "ROC_60"]
+        p10_path = _train_lightgbm(tmp_path, "q10_gap_present", feature_columns, seed=38)
+        p90_path = _train_lightgbm(tmp_path, "q90_gap_present", feature_columns, seed=39)
+        manifest = QuantileManifest(
+            market="overseas",
+            horizon=20,
+            trained_date=date(2026, 9, 5),
+            p10_path=p10_path,
+            p90_path=p90_path,
+        )
+        feature_row = _feature_row(feature_columns)
+
+        p10, p90 = predict_quantile_models(manifest, feature_row, investor_trend=_trend("A1"))
 
         assert isinstance(p10, float)
         assert isinstance(p90, float)
