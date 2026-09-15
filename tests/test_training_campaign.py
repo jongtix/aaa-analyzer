@@ -9,6 +9,7 @@ SPEC-ANALYZER-TRAIN-EVAL-001 M3. 합성 축소 데이터만 사용한다 —
 4. `purged_walk_forward_split()`가 실제로 호출됨(REQ-ATE-027, 모킹 확인).
 """
 
+import json
 from datetime import date
 from pathlib import Path
 from typing import cast
@@ -762,7 +763,18 @@ class TestActivateMarketHorizonComboDeploymentBranch:
         model_path = model_dir / model_filename
         assert model_path.exists()
         assert (model_dir / f"{model_filename}.sha256").exists()
-        assert campaign_module.campaign_metrics.sidecar_path_for(model_path).exists()
+        sidecar_path = campaign_module.campaign_metrics.sidecar_path_for(model_path)
+        assert sidecar_path.exists()
+
+        # SPEC-ANALYZER-TRAIN-META-001 REQ-TM-006 회귀 가드: 캠페인 포인트
+        # 모델 경로(activate_market_horizon_combo)는 M1의 축소 스키마 도입
+        # 이후에도 캠페인 전용 필드를 전부 그대로 기록해야 한다(무변경).
+        sidecar_payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        assert "aggregate_metrics" in sidecar_payload
+        assert "final_fold_train_row_count" in sidecar_payload
+        assert "frozen_hyperparameters" in sidecar_payload
+        assert "fold_metrics_jsonl" in sidecar_payload
+        assert "feature_columns" in sidecar_payload
 
         activation_manifest_path = campaign_module.activation_module.activation_manifest_path(
             models_root, "domestic", 20, "lightgbm"

@@ -100,6 +100,55 @@ class TestSidecarMetadataSchema:
         assert "folds" not in payload
 
 
+class TestSidecarMetadataReducedSchema:
+    """SPEC-ANALYZER-TRAIN-META-001 M1: 캠페인 외 컨텍스트(주간 재학습)는
+    캠페인 전용 필드(aggregate_metrics/final_fold_train_row_count/
+    fold_metrics_jsonl_relative_path/frozen_hyperparameters) 없이
+    `write_sidecar_metadata()`를 호출할 수 있어야 하며, 부재 필드는
+    payload에서 생략되어야 한다(AC-TM-004, B2 — 가짜 값 채움 금지)."""
+
+    def test_reduced_call_without_campaign_only_fields_omits_those_keys(self, tmp_path: Path):
+        model_path = tmp_path / "domestic_20_lightgbm_2026-09-08.txt"
+
+        sidecar_path = write_sidecar_metadata(
+            model_path,
+            market="domestic",
+            horizon=20,
+            algorithm="lightgbm",
+            feature_columns=["KMID", "ROC_5"],
+        )
+
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        assert payload["market"] == "domestic"
+        assert payload["horizon"] == 20
+        assert payload["algorithm"] == "lightgbm"
+        assert payload["feature_columns"] == ["KMID", "ROC_5"]
+        assert "aggregate_metrics" not in payload
+        assert "final_fold_train_row_count" not in payload
+        assert "fold_metrics_jsonl" not in payload
+        assert "frozen_hyperparameters" not in payload
+
+    def test_reduced_call_with_frozen_hyperparameters_supplied_includes_field(self, tmp_path: Path):
+        """AC-TM-005b: 게이트 주입으로 동결 파라미터가 공급되면 축소 호출에도
+        `frozen_hyperparameters` 필드가 그대로 기록된다."""
+        model_path = tmp_path / "domestic_20_lightgbm_2026-09-08.txt"
+
+        sidecar_path = write_sidecar_metadata(
+            model_path,
+            market="domestic",
+            horizon=20,
+            algorithm="lightgbm",
+            feature_columns=["KMID"],
+            frozen_hyperparameters={"n_estimators": 100},
+        )
+
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        assert payload["frozen_hyperparameters"] == {"n_estimators": 100}
+        assert "aggregate_metrics" not in payload
+        assert "final_fold_train_row_count" not in payload
+        assert "fold_metrics_jsonl" not in payload
+
+
 class TestComputeAggregateMetrics:
     def test_mean_stddev_icir_computed_correctly(self):
         result = compute_aggregate_metrics([0.02, 0.04])

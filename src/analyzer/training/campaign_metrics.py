@@ -91,30 +91,46 @@ def write_sidecar_metadata(
     market: str,
     horizon: int,
     algorithm: str,
-    aggregate_metrics: CampaignAggregateMetrics,
-    final_fold_train_row_count: int,
-    frozen_hyperparameters: Mapping[str, Any],
     feature_columns: Sequence[str],
-    fold_metrics_jsonl_relative_path: str,
+    aggregate_metrics: CampaignAggregateMetrics | None = None,
+    final_fold_train_row_count: int | None = None,
+    frozen_hyperparameters: Mapping[str, Any] | None = None,
+    fold_metrics_jsonl_relative_path: str | None = None,
 ) -> Path:
-    """챔피언 후보 최종 폴드 학습 완료 시점에 사이드카 메타데이터 JSON을
-    기록한다(REQ-ATE-031/032/033). 폴드별 시계열 전체는 인라인 포함하지
-    않고, 동반 JSONL 파일의 상대경로만 `fold_metrics_jsonl` 필드로 참조한다.
+    """사이드카 메타데이터 JSON을 기록한다(REQ-ATE-031/032/033,
+    SPEC-ANALYZER-TRAIN-META-001 REQ-TM-001/004/005). 캠페인 경로(폴드
+    집계가 존재)에서는 챔피언 후보 최종 폴드 학습 완료 시점에 호출되며,
+    폴드별 시계열 전체는 인라인 포함하지 않고 동반 JSONL 파일의
+    상대경로만 `fold_metrics_jsonl` 필드로 참조한다.
+
+    캠페인 외 컨텍스트(주간 재학습, 단일종목 경로)에서는
+    `aggregate_metrics`/`final_fold_train_row_count`/
+    `frozen_hyperparameters`/`fold_metrics_jsonl_relative_path`가 존재하지
+    않을 수 있다 — `None`(기본값)이면 해당 키를 payload에서 완전히
+    생략한다(가짜 값으로 채우지 않는다, REQ-TM-004/B2). 기존
+    `read_frozen_hyperparameters()`/`resolve_feature_columns()` 소비자는
+    `.get()`/특정 키 조회만 사용하므로 다른 키의 부재는 영향을 주지
+    않는다(REQ-TM-006 회귀 가드 대상 — 캠페인 호출부는 인자를 그대로
+    채워 넘기므로 동작 무변경).
     """
     payload: dict[str, Any] = {
         "market": market,
         "horizon": horizon,
         "algorithm": algorithm,
-        "aggregate_metrics": {
+        "feature_columns": list(feature_columns),
+    }
+    if aggregate_metrics is not None:
+        payload["aggregate_metrics"] = {
             "mean_rank_ic": aggregate_metrics.mean_rank_ic,
             "stddev_rank_ic": aggregate_metrics.stddev_rank_ic,
             "icir": aggregate_metrics.icir,
-        },
-        "final_fold_train_row_count": final_fold_train_row_count,
-        "frozen_hyperparameters": dict(frozen_hyperparameters),
-        "feature_columns": list(feature_columns),
-        "fold_metrics_jsonl": fold_metrics_jsonl_relative_path,
-    }
+        }
+    if final_fold_train_row_count is not None:
+        payload["final_fold_train_row_count"] = final_fold_train_row_count
+    if frozen_hyperparameters is not None:
+        payload["frozen_hyperparameters"] = dict(frozen_hyperparameters)
+    if fold_metrics_jsonl_relative_path is not None:
+        payload["fold_metrics_jsonl"] = fold_metrics_jsonl_relative_path
     sidecar_path = sidecar_path_for(model_path)
     sidecar_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return sidecar_path
