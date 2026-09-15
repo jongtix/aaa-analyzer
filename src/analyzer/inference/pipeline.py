@@ -41,7 +41,7 @@ from analyzer.inference.resolution import (
     resolve_serving_targets,
 )
 from analyzer.inference.scoring import resolve_confidence_for_stock
-from analyzer.inference.sweep import sweep_and_write_price_bands
+from analyzer.inference.sweep import _union_feature_columns, sweep_and_write_price_bands
 from analyzer.inference.writer import (
     InsertOutcome,
     TradingSignalRow,
@@ -176,8 +176,20 @@ def run_market_inference(
                 continue
 
             if feature_cache is None:
+                # SPEC-ANALYZER-TRAIN-META-001 M7b(REQ-TM-011): M7이 함수에
+                # 심어둔 opt-in `feature_columns` 조기 스킵 가드를 여기서
+                # 실제로 활성화한다 — 생략하면(기본값 `None`) 가드가 완전히
+                # 비활성 상태로 남아 investor_trend 결측 종목이 predict.py의
+                # 무방비 `ValueError`까지 도달해 UNEXPECTED_ERROR로
+                # 오분류된다(AC-TM-010). `sweep.py`의 기존 조기 스킵과 동일한
+                # `_union_feature_columns(serving_plan)`을 그대로 재사용해
+                # 두 경로의 판별 기준을 일치시킨다.
                 feature_cache = assemble_inference_features_batch(
-                    engine, calendar, [stock_code for _, stock_code in universe], trade_date
+                    engine,
+                    calendar,
+                    [stock_code for _, stock_code in universe],
+                    trade_date,
+                    feature_columns=_union_feature_columns(serving_plan),
                 )
 
             model_version = resolve_model_version(serving_plan)
