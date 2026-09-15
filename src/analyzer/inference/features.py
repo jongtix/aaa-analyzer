@@ -37,7 +37,7 @@ from analyzer.data.repository import (
     fetch_daily_ohlcv,
     fetch_investor_trend,
 )
-from analyzer.features.classification import FEATURE_REGISTRY
+from analyzer.features.classification import FEATURE_REGISTRY, FeatureClass, classify_feature
 from analyzer.features.supply_demand import compute_supply_demand_features
 from analyzer.features.technical import compute_technical_features
 from analyzer.inference.resolution import SkipReason
@@ -109,6 +109,30 @@ def assemble_inference_features_batch(
         features = assemble_inference_features(engine, calendar, stock_code, as_of_date)
         results[stock_code] = features if features is not None else SkipReason.FEATURE_INSUFFICIENT
     return results
+
+
+def has_supply_demand_gap(feature_columns: Sequence[str], investor_trend: pd.DataFrame) -> bool:
+    """단일종목 스코어링 경로 방어 심층화(SPEC-ANALYZER-TRAIN-META-001 M2,
+    REQ-TM-007) — `feature_columns`(예: `resolve_feature_columns()`가 해석한
+    목록)에 FROZEN 수급 피처가 포함되어 있는데 `investor_trend`가 비어
+    있으면 `True`를 반환한다.
+
+    `inference/sweep.py::assemble_sweep_feature_matrix()`의 기존 조기 스킵
+    조건(FROZEN 컬럼 필요 + `trend.empty`)과 동일한 판별 로직이다 —
+    호출자는 `True`일 때 `SkipReason.FEATURE_INSUFFICIENT`로 라우팅해
+    `predict.py::_select_feature_columns()`의 무방비 `ValueError` 호출부에
+    도달하기 전에 스킵해야 한다(research.md §3.4의 비대칭 해소).
+
+    이 함수 자체는 스킵하지 않는다 — 판별만 하고 라우팅은 호출자 책임이다.
+    `assemble_inference_features()`의 기존 반환 계약(`DataFrame | None`,
+    INFER-001 M5)은 이 함수의 도입으로 변경되지 않는다(REQ-TM-006 방향의
+    회귀 최소화 원칙과 동일 취지). `predict.py::_select_feature_columns()`
+    의 기존 `ValueError` 데이터 무결성 가드는 이 함수와 무관하게 무수정
+    유지된다(REQ-TM-008) — investor_trend 결측과 무관한 진짜 컬럼 누락은
+    여전히 그 가드가 처리한다.
+    """
+    frozen_required = any(classify_feature(c) == FeatureClass.FROZEN for c in feature_columns)
+    return frozen_required and investor_trend.empty
 
 
 def resolve_feature_columns(model_path: Path) -> list[str]:

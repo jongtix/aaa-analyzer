@@ -20,6 +20,7 @@ from analyzer.inference.features import (
     LOOKBACK_TRADING_DAYS,
     assemble_inference_features,
     assemble_inference_features_batch,
+    has_supply_demand_gap,
     resolve_feature_columns,
 )
 from analyzer.inference.resolution import SkipReason
@@ -244,6 +245,44 @@ class TestResolveFeatureColumns:
 
         assert set(result) == set(FEATURE_REGISTRY)
         assert len(result) == 40
+
+
+class TestHasSupplyDemandGap:
+    """SPEC-ANALYZER-TRAIN-META-001 M2(REQ-TM-007/008, plan.md §E M2,
+    research.md §6-3): 단일종목 스코어링 경로에도 `inference/sweep.py::
+    assemble_sweep_feature_matrix()`와 동일한 조기 판별(FROZEN 컬럼 요구
+    + investor_trend 결측)을 제공하는 얇은 판별 함수.
+
+    `assemble_inference_features()`의 기존 반환 계약(`DataFrame | None`,
+    M5)은 무수정 — 이 함수는 호출자가 그 계약과는 별개로 사전에 확인하는
+    용도다(판별만 하고 라우팅은 호출자 책임)."""
+
+    def test_frozen_required_and_trend_empty_returns_true(self):
+        """해외 종목 시나리오(research.md §6-3) — FROZEN 수급 피처가
+        feature_columns에 포함되어 있는데 investor_trend가 비어 있으면
+        갭이 있다고 판별해야 한다(shall)."""
+        result = has_supply_demand_gap(["foreign_net_ratio", "ROC_60"], _empty_trend())
+
+        assert result is True
+
+    def test_trend_present_returns_false(self):
+        """FROZEN 컬럼이 필요해도 investor_trend가 존재하면 갭이 아니다
+        (shall not) — 도메스틱 종목처럼 정상적으로 수급 데이터가 있는
+        경우 조기 스킵을 걸지 않아야 한다."""
+        dates = _weekdays(date(2026, 1, 1), date(2026, 1, 10))
+        result = has_supply_demand_gap(["foreign_net_ratio"], _trend("A1", dates))
+
+        assert result is False
+
+    def test_frozen_not_required_and_trend_empty_returns_false(self):
+        """FROZEN 컬럼이 애초에 feature_columns에 없으면(예: 사이드카가
+        해외 유니버스에 맞춰 FROZEN 컬럼을 이미 제외한 경우) investor_trend가
+        비어 있어도 갭이 아니다(shall not) — 스윕 경로(`_frozen_columns`
+        비어있으면 investor_trend 조회 자체를 건너뛰는 동작)와 동일한
+        판별 결과를 내야 한다."""
+        result = has_supply_demand_gap(["ROC_60", "KMID"], _empty_trend())
+
+        assert result is False
 
 
 class TestFeatureAssemblyRegistryGuard:
