@@ -6,6 +6,7 @@ mock/stub으로 검증한다. 실 DB 접속(trainer 계정, SSH 터널)은 필�
 않다 — 모든 외부 I/O 경계를 모킹한다.
 """
 
+import json
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -293,6 +294,159 @@ class TestRunTrainingPipelineOrchestration:
         # 8 포인트 조합(중복 없음) — 분위수 보조 모델이 별도 조합으로
         # 이중 계산되지 않았음을 확인.
         assert len(result.saved_combos) == len(expected_combos)
+
+
+class TestSidecarWiringWeeklyRetrain:
+    """SPEC-ANALYZER-TRAIN-META-001 M3(REQ-TM-001/002/003/004/005):
+    주간 재학습 저장 경로(`_persist_trained_models()`)가 포인트+분위수
+    모델 모두에 `.meta.json` 사이드카를 기록해야 한다 — research.md §6-1
+    재현 시나리오(구현 전에는 사이드카가 전혀 기록되지 않는다, RED)."""
+
+    @staticmethod
+    def _fake_train_pooled_models_with_quantiles(
+        data_by_combo, lgbm_params=None, xgb_params=None, **_
+    ):
+        models: dict[tuple, object] = {}
+        for market, horizon in data_by_combo:
+            models[(market, horizon, "lightgbm")] = MagicMock(spec=lgb.LGBMRegressor)
+            models[(market, horizon, "xgboost")] = MagicMock()
+            for alpha in (0.10, 0.90):
+                models[(market, horizon, "lightgbm_quantile", alpha)] = MagicMock(
+                    spec=lgb.LGBMRegressor
+                )
+        return models
+
+    @staticmethod
+    def _fake_save_model_native(model, models_root, market, horizon, algorithm, trained_date):
+        from analyzer.training.persistence import SavedModel
+
+        path = models_root / f"{market}_{horizon}_{algorithm}.bin"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return SavedModel(model_path=path, sidecar_path=path, sha256="deadbeef")
+
+    @staticmethod
+    def _fake_save_quantile_model(model, models_root, market, horizon, alpha, trained_date):
+        from analyzer.training.persistence import SavedModel
+
+        path = models_root / f"{market}_{horizon}_lightgbm_q{int(alpha * 100)}.bin"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return SavedModel(model_path=path, sidecar_path=path, sha256="deadbeef")
+
+    def _run_pipeline(self, tmp_path: Path, frozen_params_by_combo=None):
+        with (
+            patch.object(
+                train_module,
+                "fetch_market_calendar",
+                return_value=TradingCalendar(calendar_code="KRX", trading_days=frozenset()),
+            ),
+            patch.object(
+                train_module,
+                "fetch_stock_universe",
+                return_value=pd.DataFrame({"stock_code": [], "grade": [], "delisted_at": []}),
+            ),
+            patch.object(train_module, "fetch_market_data", return_value=({}, {}, {})),
+            patch.object(
+                train_module.cache_module,
+                "assemble_dataset_cached",
+                return_value=_dummy_assembled_dataset(),
+            ),
+            patch.object(
+                train_module,
+                "train_pooled_models",
+                side_effect=self._fake_train_pooled_models_with_quantiles,
+            ),
+            patch.object(
+                train_module.persistence_module,
+                "save_model_native",
+                side_effect=self._fake_save_model_native,
+            ),
+            patch.object(
+                train_module, "_save_quantile_model", side_effect=self._fake_save_quantile_model
+            ),
+        ):
+            result = run_training_pipeline(
+                trainer_engine=MagicMock(),
+                calendar_code="KRX",
+                cache_dir=tmp_path / "cache",
+                models_root=tmp_path / "models",
+                data_as_of=date(2026, 8, 8),
+                feature_code_version="v1",
+                frozen_params_by_combo=frozen_params_by_combo,
+            )
+        return result
+
+    def test_point_model_sidecar_records_feature_columns(self, tmp_path: Path):
+        """AC-TM-001: 포인트 모델(lightgbm/xgboost) 저장 시 `.meta.json`이
+        기록되고 `feature_columns`가 `_split_features_and_labels()` 산출과
+        정확히 일치해야 한다."""
+        from analyzer.training import campaign_metrics as campaign_metrics_module
+
+        result = self._run_pipeline(tmp_path)
+
+        assert result.success is True
+        point_model_path = tmp_path / "models" / "domestic_20_lightgbm.bin"
+        sidecar_path = campaign_metrics_module.sidecar_path_for(point_model_path)
+        assert sidecar_path.is_file(), "포인트 모델 .meta.json 사이드카가 기록되어야 한다"
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        assert payload["feature_columns"] == ["KMID"]
+
+    def test_quantile_model_sidecar_records_feature_columns(self, tmp_path: Path):
+        """AC-TM-002: 분위수(q10/q90) 모델도 `.meta.json`을 받아야 한다 —
+        이전에는 어떤 저장 경로에서도 존재한 적이 없다(research.md §3)."""
+        from analyzer.training import campaign_metrics as campaign_metrics_module
+
+        result = self._run_pipeline(tmp_path)
+
+        assert result.success is True
+        for alpha_pct in (10, 90):
+            quantile_path = tmp_path / "models" / f"domestic_20_lightgbm_q{alpha_pct}.bin"
+            sidecar_path = campaign_metrics_module.sidecar_path_for(quantile_path)
+            assert sidecar_path.is_file(), (
+                f"분위수(q{alpha_pct}) 모델 .meta.json 사이드카가 기록되어야 한다"
+            )
+            payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+            assert payload["feature_columns"] == ["KMID"]
+
+    def test_reduced_schema_omits_campaign_only_fields_and_frozen_hyperparameters(
+        self, tmp_path: Path
+    ):
+        """AC-TM-004 + AC-TM-005: 캠페인 전용 필드(aggregate_metrics/
+        fold_metrics_jsonl/final_fold_train_row_count)와, 게이트 미개입 시
+        frozen_hyperparameters 모두 payload에서 생략되어야 한다(가짜 값으로
+        채우지 않는다, B2)."""
+        from analyzer.training import campaign_metrics as campaign_metrics_module
+
+        result = self._run_pipeline(tmp_path)
+
+        assert result.success is True
+        point_model_path = tmp_path / "models" / "domestic_20_lightgbm.bin"
+        sidecar_path = campaign_metrics_module.sidecar_path_for(point_model_path)
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        assert "aggregate_metrics" not in payload
+        assert "fold_metrics_jsonl" not in payload
+        assert "final_fold_train_row_count" not in payload
+        assert "frozen_hyperparameters" not in payload
+
+    def test_frozen_hyperparameters_recorded_when_supplied_via_gate_injection(self, tmp_path: Path):
+        """AC-TM-005b(REQ-TM-003): REQ-ATG-011 게이트 주입으로 특정
+        (market,horizon,algorithm) 조합에 동결 하이퍼파라미터가 공급되면
+        그 값이 그대로 사이드카에 기록되어야 한다 — 공급되지 않은 형제
+        조합(동일 market,horizon의 다른 algorithm)에는 영향이 없어야 한다."""
+        from analyzer.training import campaign_metrics as campaign_metrics_module
+
+        frozen_params_by_combo = {("domestic", 20, "xgboost"): {"n_estimators": 38}}
+        result = self._run_pipeline(tmp_path, frozen_params_by_combo=frozen_params_by_combo)
+
+        assert result.success is True
+        xgb_model_path = tmp_path / "models" / "domestic_20_xgboost.bin"
+        xgb_sidecar_path = campaign_metrics_module.sidecar_path_for(xgb_model_path)
+        xgb_payload = json.loads(xgb_sidecar_path.read_text(encoding="utf-8"))
+        assert xgb_payload["frozen_hyperparameters"] == {"n_estimators": 38}
+
+        lgbm_model_path = tmp_path / "models" / "domestic_20_lightgbm.bin"
+        lgbm_sidecar_path = campaign_metrics_module.sidecar_path_for(lgbm_model_path)
+        lgbm_payload = json.loads(lgbm_sidecar_path.read_text(encoding="utf-8"))
+        assert "frozen_hyperparameters" not in lgbm_payload
 
 
 class TestFrozenParamsByComboInjection:
