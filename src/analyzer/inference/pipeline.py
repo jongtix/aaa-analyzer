@@ -102,6 +102,12 @@ class _SkippedStock(Exception):
         self.reason = reason
 
 
+# @MX:NOTE: `python -m analyzer.inference`(자식 CLI)의 유일한 오케스트레이션
+# 진입점 — `__main__.main()`이 이 함수 하나만 호출한다(fan_in=1, ANCHOR
+# 기준인 fan_in>=3 미달). 다만 CLI 자체가 공개 API 경계이므로 시그니처
+# 변경(REQ-APL-100 리터럴 시그니처) 시 하위호환 영향 범위가 넓다.
+# @MX:TODO: fan_in이 3 이상으로 늘거나(예: 배치 재처리 CLI 추가 등) 공개
+# API 경계 성격이 강화되면 `@MX:ANCHOR`로 격상 재평가(차기 `/moai mx` 스캔).
 def run_market_inference(
     market: str,
     *,
