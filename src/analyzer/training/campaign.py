@@ -778,11 +778,31 @@ def train_and_persist_champion_quantiles(
     LightGBM 분위수 모델은 (시장,horizon) 단위이지 챔피언 알고리즘 단위가
     아니므로, 이 함수는 `algorithms_to_persist`(1개 또는 2개)와 무관하게
     조합당 정확히 1회만 호출된다(호출부: `activate_market_horizon_combo()`).
+
+    SPEC-ANALYZER-TRAIN-META-001 M4(REQ-TM-002 후반부): 저장 직후 q10/q90
+    각각에 `campaign_metrics.write_sidecar_metadata()`의 M1 축소 스키마로
+    `.meta.json`을 기록한다 — 이전에는 캠페인 1차 배포 경로에서조차 분위수
+    모델이 사이드카를 받은 적이 없었다(research.md §3, 구조적 공백).
+    `feature_columns`는 포인트 모델(`train_and_persist_champion_artifact()`)과
+    **동일한** `_final_fold_train_window()` 학습 구간에서 산출한 값을 그대로
+    재사용한다(포인트 모델 호출부와 동일 인자로 호출되므로 동일 `train_df`가
+    나오고, `_split_features_and_labels()`는 `train_df`/`horizon`에만
+    의존해 알고리즘 무관 결정론적 함수다 — 별도로 재계산하지 않는다).
+
+    `aggregate_metrics`/`final_fold_train_row_count`/
+    `fold_metrics_jsonl_relative_path`는 생략한다(REQ-TM-005 축소 스키마)
+    — 이 분위수 모델은 포인트 모델과 달리 캠페인 폴드 백테스트로 평가된 적이
+    없으므로(confidence 캘리브레이션 전용 보조 모델, 폴드 순회 대상 아님)
+    그 필드들이 가리키는 데이터 자체가 존재하지 않는다(가짜 값으로 채우지
+    않는다, B2). `frozen_hyperparameters`는 이 함수가 항상 공급받는
+    `frozen_lgbm_params`를 그대로 기록한다(REQ-TM-003과 동일 취지 — 이
+    값은 실제로 이 두 분위수 모델을 학습시킨 하이퍼파라미터이므로 생략
+    대상이 아니다).
     """
     train_df = _final_fold_train_window(
         panel, horizon, initial_train_end_idx, n_folds, val_size, trade_dates=trade_dates
     )
-    _, x_train, y_train = train_module._split_features_and_labels(train_df, horizon)
+    feature_columns, x_train, y_train = train_module._split_features_and_labels(train_df, horizon)
     x_train_arr, y_train_arr = x_train.to_numpy(), y_train.to_numpy()
 
     q10_model = lgb.LGBMRegressor(
@@ -810,6 +830,15 @@ def train_and_persist_champion_quantiles(
     q90_saved = persistence_module.save_quantile_model(
         q90_model, models_root, market, horizon, QUANTILE_ALPHAS[1], trained_date
     )
+    for saved in (q10_saved, q90_saved):
+        campaign_metrics.write_sidecar_metadata(
+            saved.model_path,
+            market=market,
+            horizon=horizon,
+            algorithm="lightgbm",
+            feature_columns=feature_columns,
+            frozen_hyperparameters=frozen_lgbm_params,
+        )
     return q10_saved, q90_saved
 
 
