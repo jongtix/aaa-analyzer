@@ -34,7 +34,7 @@ from analyzer.data.config import get_db_config
 from analyzer.data.repository import build_engine
 from analyzer.inference.config import InferenceConfig, get_inference_config
 from analyzer.inference.lock import acquire_inflight_lock, release_inflight_lock
-from analyzer.inference.redis_client import build_redis_client
+from analyzer.inference.redis_client import DEFAULT_BLOCK_MILLISECONDS, build_redis_client
 from analyzer.inference.spawn import spawn_inference_child
 from analyzer.inference.trade_date import resolve_trade_date
 
@@ -51,7 +51,6 @@ MAX_DELIVERY_COUNT = 3
 
 _READ_BATCH_SIZE = 10
 _CLAIM_BATCH_SIZE = 100
-_DEFAULT_BLOCK_MILLISECONDS = 5_000
 _DEFAULT_ERROR_BACKOFF_SECONDS = 5.0
 
 SpawnChild = Callable[..., Coroutine[Any, Any, int]]
@@ -89,7 +88,7 @@ class StreamConsumer:
         client: Any | None = None,
         spawn_child: SpawnChild | None = None,
         resolve_trade_date: TradeDateResolver | None = None,
-        block_milliseconds: int = _DEFAULT_BLOCK_MILLISECONDS,
+        block_milliseconds: int = DEFAULT_BLOCK_MILLISECONDS,
         error_backoff_seconds: float = _DEFAULT_ERROR_BACKOFF_SECONDS,
     ) -> None:
         self._config = config
