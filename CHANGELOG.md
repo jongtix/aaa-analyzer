@@ -5,6 +5,10 @@
 
 ### 🐛
 
+- Docker CI Trivy CVE scan 실패로 인한 GHCR 배포 중단 해소 — v0.24.1(Redis 소켓 타임아웃 정합 결함 수정)이 base 이미지(`python:3.14-slim`)의 상류-지연(upstream-lag) CVE 13건(perl 계열 CRITICAL 1건/HIGH 5건, gzip, libpcre2-8-0 3건, libsqlite3-0 2건)에 막혀 한 번도 배포되지 못한 상태였다
+  - **근본원인**: Debian trixie 패키지 저장소에는 각 CVE의 수정판(`deb13u1`/`deb13u2`)이 이미 게시됐으나, pin된 `python:3.14-slim` base 이미지(Docker Hub 최신 digest와 일치·2026-09-01 빌드)가 아직 이를 반영해 재빌드되지 않은 상태 — 레포 내 교정 수단이 없음을 확인(Dependabot docker ecosystem도 교체 대상 digest가 없어 PR을 낼 수 없었음)
+  - `.trivyignore`에 기존 3건(util-linux 계열, openssl)과 동일한 패턴으로 30일 시한부 예외 13건 등록(REQ-CVE-022, 만료 2026-10-17)
+  - Docker 워크플로는 태그 push(v*)에만 트리거되고 `.trivyignore` 예외 등록 자체는 chore 타입이라 새 태그를 만들지 않으므로, 실제 배포 재개를 위해 이 CHANGELOG 갱신을 patch 릴리스로 발행
 - `stream:daily:complete` 컨슈머 Redis 소켓 타임아웃 정합 결함 수정 — DLQ 메시지 유실 방지 (SPEC-ANALYZER-REDIS-TIMEOUT-001, REQ-RT-010~060, AC-001~005)
   - **근본원인**: `redis_client.py::build_redis_client()`가 `socket_timeout`을 명시하지 않아 redis-py 라이브러리 자체 기본값(5초)이 `StreamConsumer`의 XREADGROUP `BLOCK`(5000ms=5초)과 정확히 일치해 안전마진이 0이었다. 도커 브릿지 네트워크 지연 등 아주 작은 추가 지연만으로도 클라이언트 로컬 소켓 read가 서버 응답보다 먼저 `TimeoutError`를 일으켰고, 이 시점에 Redis 서버는 이미 메시지를 PEL에 등록했을 수 있어 `_handle_message()`(→ `spawn_inference_child()`)를 한 번도 거치지 않은 채 고아 메시지가 되어 재전달 한도(3회) 초과 후 DLQ로 이관됐다 — 2026-09-04~09-16(12일) 사이 `stream:daily:complete` 이벤트 18건 전건 유실
   - `redis_client.py`: `DEFAULT_BLOCK_MILLISECONDS`(BLOCK 값의 단일 출처, SSOT)로부터 파생 계산한 `SOCKET_TIMEOUT_SECONDS`(BLOCK + 10초 안전마진)를 `build_redis_client()`의 `socket_timeout`으로 명시 설정, 모듈 임포트 시점에 안전마진 불변식을 `assert`로 고정
