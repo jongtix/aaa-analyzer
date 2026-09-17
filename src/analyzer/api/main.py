@@ -25,7 +25,9 @@ SPEC-ANALYZER-TRAIN-TUNING-001 M7(REQ-ATT-002/003/004/013): 위 두 배선
 
 import asyncio
 import contextlib
+import os
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import uvicorn
@@ -237,6 +239,25 @@ def wire_monthly_optuna_tuning_job(
     )
 
 
+def _bootstrap_prometheus_multiproc_dir() -> None:
+    """SPEC-ANALYZER-PIPELINE-001 §2.4: `PROMETHEUS_MULTIPROC_DIR`은 tmpfs
+    마운트 위에 있어 컨테이너 재시작마다 빈 상태로 시작한다 — 디렉터리
+    자체가 없으면 `multiprocess.MultiProcessCollector`(app.py `/metrics`)가
+    `ValueError`로 실패하므로, `/metrics`가 서빙 가능해지기 전(uvicorn 기동
+    전)에 디렉터리를 보장 생성한다. 아울러 이전 프로세스 수명의 잔존 pid
+    덤프 파일(`*.db`)이 남아 있으면 현재 실행의 집계 메트릭을 오염시키므로
+    함께 정리한다(aaa-infra#169). `PROMETHEUS_MULTIPROC_DIR`이 설정돼
+    있지 않으면(로컬 개발/테스트) 아무 작업도 하지 않는다.
+    """
+    multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+    if not multiproc_dir:
+        return
+    path = Path(multiproc_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    for stale_dump in path.glob("*.db"):
+        stale_dump.unlink()
+
+
 async def run(host: str = "0.0.0.0", port: int = 8000) -> None:
     """상주 부모 프로세스를 시작한다: FastAPI 앱 + cron 잡 + 스트림 컨슈머 배선.
 
@@ -272,6 +293,8 @@ async def run(host: str = "0.0.0.0", port: int = 8000) -> None:
         "orchestration wired (jobs=%d, stream consumer started)",
         len(scheduler.registered_jobs()),
     )
+
+    _bootstrap_prometheus_multiproc_dir()
 
     app = create_app()
     uvicorn_config = uvicorn.Config(app, host=host, port=port, log_level="info")
