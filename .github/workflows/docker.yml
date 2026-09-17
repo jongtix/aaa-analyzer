@@ -122,15 +122,14 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_SYSTEM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_OPERATOR_CHAT_ID }}
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ steps.tag.outputs.tag || github.ref_name }}
         run: |
           echo "::add-mask::$BOT_TOKEN"
           echo "::add-mask::$CHAT_ID"
           set +x
           NL=$'\n'
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          DISPLAY_TAG="${TAG:-${{ github.ref_name }}}"
-          TEXT="🔒 <b>[CVE 게이트] aaa-analyzer 빌드 실패</b>${NL}상태: 태그 ${DISPLAY_TAG} 빌드 또는 CVE 스캔에서 실패 — GHCR push 차단됨(배포 없음).${NL}확인: ${RUN_URL} 에서 실패 원인 확인 → 필요 시 .trivyignore 예외 등록 후 gh run rerun --failed로 재실행(aaa/CLAUDE.md § Git Rules 절차 참조)"
+          TEXT="🔒 <b>[CVE 게이트] aaa-analyzer 빌드 실패</b>${NL}상태: 태그 ${TAG} 빌드 또는 CVE 스캔에서 실패 — GHCR push 차단됨(배포 없음).${NL}확인: ${RUN_URL} 에서 실패 원인 확인 → 필요 시 .trivyignore 예외 등록 후 gh run rerun --failed로 동일 태그 재실행(aaa/.claude/rules/aaa/project-instructions.md § Git Rules 절차 참조)"
           printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$BOT_TOKEN" \
             | curl -sf -K - \
               --data-urlencode "chat_id=${CHAT_ID}" \
