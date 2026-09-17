@@ -730,3 +730,38 @@ class TestRunEntrypointFailFast:
 
         with pytest.raises(MissingConfigError):
             asyncio.run(main_module.run(host="127.0.0.1", port=8002))
+
+
+class TestBootstrapPrometheusMultiprocDir:
+    """SPEC-ANALYZER-PIPELINE-001 §2.4: `PROMETHEUS_MULTIPROC_DIR`은 tmpfs
+    위에 있어 컨테이너 재시작마다 빈 상태로 시작한다 — 부모 프로세스가
+    `/metrics`를 서빙하기 전에 이 디렉터리를 보장 생성하고, 이전 실행의
+    잔존 pid 덤프 파일(`*.db`)을 정리해야 한다(aaa-infra#169)."""
+
+    def test_creates_missing_multiproc_dir(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        multiproc_dir = tmp_path / "prometheus-multiproc"
+        assert not multiproc_dir.exists()
+        monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(multiproc_dir))
+
+        main_module._bootstrap_prometheus_multiproc_dir()
+
+        assert multiproc_dir.is_dir()
+
+    def test_clears_stale_db_files_from_previous_process_lifetime(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        multiproc_dir = tmp_path / "prometheus-multiproc"
+        multiproc_dir.mkdir(parents=True)
+        stale_file = multiproc_dir / "counter_111.db"
+        stale_file.write_bytes(b"stale pid dump")
+        monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(multiproc_dir))
+
+        main_module._bootstrap_prometheus_multiproc_dir()
+
+        assert not stale_file.exists()
+        assert multiproc_dir.is_dir()
+
+    def test_noop_when_env_var_unset(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+
+        main_module._bootstrap_prometheus_multiproc_dir()  # 예외 없이 반환
