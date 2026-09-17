@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### 👷
+
+- docker.yml에 Trivy CVE 게이트/빌드 실패 시 독립 Telegram 알림 스텝 추가(SPEC-INFRA-CVE-SCAN-004 M1) — deploy.yml의 workflow_run 게이팅과 무관하게 항상 발동, 기존 시스템봇 재사용
+
 ### 🐛
 
 - Docker CI Trivy CVE scan 실패로 인한 GHCR 배포 중단 해소 — v0.24.1(Redis 소켓 타임아웃 정합 결함 수정)이 base 이미지(`python:3.14-slim`)의 상류-지연(upstream-lag) CVE 13건(perl 계열 CRITICAL 1건/HIGH 5건, gzip, libpcre2-8-0 3건, libsqlite3-0 2건)에 막혀 한 번도 배포되지 못한 상태였다
