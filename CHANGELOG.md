@@ -3,6 +3,15 @@
 
 ## Unreleased
 
+### 🐛
+
+- `stream:daily:complete` 컨슈머 Redis 소켓 타임아웃 정합 결함 수정 — DLQ 메시지 유실 방지 (SPEC-ANALYZER-REDIS-TIMEOUT-001, REQ-RT-010~060, AC-001~005)
+  - **근본원인**: `redis_client.py::build_redis_client()`가 `socket_timeout`을 명시하지 않아 redis-py 라이브러리 자체 기본값(5초)이 `StreamConsumer`의 XREADGROUP `BLOCK`(5000ms=5초)과 정확히 일치해 안전마진이 0이었다. 도커 브릿지 네트워크 지연 등 아주 작은 추가 지연만으로도 클라이언트 로컬 소켓 read가 서버 응답보다 먼저 `TimeoutError`를 일으켰고, 이 시점에 Redis 서버는 이미 메시지를 PEL에 등록했을 수 있어 `_handle_message()`(→ `spawn_inference_child()`)를 한 번도 거치지 않은 채 고아 메시지가 되어 재전달 한도(3회) 초과 후 DLQ로 이관됐다 — 2026-09-04~09-16(12일) 사이 `stream:daily:complete` 이벤트 18건 전건 유실
+  - `redis_client.py`: `DEFAULT_BLOCK_MILLISECONDS`(BLOCK 값의 단일 출처, SSOT)로부터 파생 계산한 `SOCKET_TIMEOUT_SECONDS`(BLOCK + 10초 안전마진)를 `build_redis_client()`의 `socket_timeout`으로 명시 설정, 모듈 임포트 시점에 안전마진 불변식을 `assert`로 고정
+  - `orchestration/consumer.py`: 자체 `BLOCK` 상수 리터럴을 선언하지 않고 `redis_client.py`의 `DEFAULT_BLOCK_MILLISECONDS`를 재수입(순환 임포트 방지 목적의 단방향 의존)
+  - `tests/test_inference_redis_client.py` 신규 — `socket_timeout > BLOCK(초 환산)` 불변식을 고정하는 회귀 가드(하드코딩 값이 아닌 마진 역전 시뮬레이션에서 반드시 FAIL하는 구조적 테스트)
+  - 메시지 처리·DLQ·재전달 로직 자체는 변경 없음 — 이 SPEC은 `socket_timeout` 설정 결함 하나만 수정하는 국소 범위
+
 ### ✨
 
 - 모델 영속화 경로 전면에 `.meta.json` 사이드카 배선 — standing-gate/주간 재학습/분위수 모델 커버리지 결함 수정 (SPEC-ANALYZER-TRAIN-META-001 M1-M7b/M6a/M6b, REQ-TM-001~011, [aaa-infra#163](https://github.com/jongtix/aaa-infra/issues/163))
