@@ -5,11 +5,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Service Overview
 
 AAA(Algorithmic Alpha Advisor) Phase 2 ML 분석 서비스. 시장 데이터 기반 피처 계산·레이블링·학습·추론을
-담당한다. 최종 목표(후속 SPEC 소관): `stream:daily:complete` 구독 → 시장별 모델 Lazy Load → A·B등급
+담당한다. 목표 파이프라인: `stream:daily:complete` 구독 → 시장별 모델 Lazy Load → A·B등급
 배치 추론 → `trading_signals` INSERT + `stream:signal:*` 발행.
 
-현재 레포 상태는 SPEC-ANALYZER-FOUNDATION-001(스캐폴딩 + 프로세스 골격 + CI/CD 기반) 범위로
-한정된다. 실제 추론/피처/레이블/학습 로직은 없다.
+레포 스캐폴딩은 SPEC-ANALYZER-FOUNDATION-001(2026-07-04 완료)에서 마련됐고, 이후
+SPEC-ANALYZER-FEATURE/LABEL/TRAIN 계열(피처·레이블·학습 코어) → SPEC-ANALYZER-INFER-001
+(2026-09-14 완료, 추론 서버) → SPEC-ANALYZER-PIPELINE-001(2026-09-15 완료) →
+SPEC-ANALYZER-TRAIN-META-001(2026-09-15 완료)로 이어지며 실제 추론/피처/레이블/학습 로직이
+전부 구현·배선 완료됐다(2026-09-18 코드 조사로 확인). 상세 SPEC 이력은 `aaa/TODO.md`
+aaa-analyzer 섹션 참고.
 
 ## Tech Stack
 
@@ -20,10 +24,12 @@ AAA(Algorithmic Alpha Advisor) Phase 2 ML 분석 서비스. 시장 데이터 기
 ## Process Model
 
 - **상주 부모**: 단일 asyncio 프로세스. FastAPI(`/health`, `/metrics`) + 스트림 컨슈머/APScheduler
-  **자리**(`orchestration/consumer.py`·`orchestration/scheduler.py` — 실제 구독/잡 로직은
-  후속 SPEC INFER-001/TRAIN-001 소관).
-- **완결형 자식**: `python -m analyzer.inference --market <market>` — 인자 파싱 후 exit 0(현재는
-  predict 로직 없음). 자식 프로세스 종료로 OS 메모리 확정 반환(500MB 예산 구조적 보장) + 장애 격리.
+  (`orchestration/consumer.py`·`orchestration/scheduler.py` — `stream:daily:complete` 구독·
+  잡 스케줄링 실 로직 SPEC-ANALYZER-INFER-001/PIPELINE-001/TRAIN-META-001로 구현·배선 완료,
+  2026-09-18 코드 조사 확인).
+- **완결형 자식**: `python -m analyzer.inference --market <market>` — 시장별 배치 predict 실행
+  (SPEC-ANALYZER-INFER-001 이후 실 로직 구현). 자식 프로세스 종료로 OS 메모리 확정 반환(500MB
+  예산 구조적 보장) + 장애 격리.
 
 ## Build & Run
 
@@ -74,8 +80,8 @@ uv run pytest -m integration        # 통합만 (현재 0개 — 정상. 마커 
 ## DB / Migration (ADR-016)
 
 analyzer는 DDL이 없다. `trading_signals` 스키마 마이그레이션은 collector 레포 Flyway가 소유한다.
-본 레포는 DB에 접속하지 않는 골격 단계이며, 실제 DB 접속은 INFER-001(추론)·TRAIN-001(학습)에서
-도입된다.
+실제 DB 접속은 SPEC-ANALYZER-DATA-001(2026-08-06 완료) 이후 도입되어 INFER-001/PIPELINE-001/
+TRAIN-META-001까지 이어지며 현재 운영 중이다.
 
 ## Docker (ADR-032)
 
