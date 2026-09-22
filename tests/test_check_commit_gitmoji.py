@@ -6,6 +6,7 @@ gitmoji 없이 main에 머지된 실제 사례)를 PR 시점에 차단하는 게
 검증한다.
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +23,25 @@ REPO_TAGS_BY_LEVEL = {
     "minor_tags": ("✨", ":sparkles:"),
     "patch_tags": ("🐛", "⚡", ":bug:", ":zap:"),
 }
+
+
+def _clean_git_env() -> dict[str, str]:
+    """앰비언트 GIT_* 환경변수를 제거한 환경을 반환한다.
+
+    git이 훅(pre-commit/pre-push 등)을 실행할 때는 GIT_DIR/GIT_WORK_TREE/
+    GIT_INDEX_FILE 등을 훅 프로세스 환경에 주입해 "현재 커밋 대상 저장소"를
+    가리키게 한다. 이 pytest 스위트가 그 훅 안에서(pre-push 등) 실행되면,
+    아래 테스트들이 tmp_path에 만든 "격리된" 저장소를 대상으로 git을 호출해도
+    이 환경변수들이 실제로는 호출을 원래 저장소로 되돌려 보낸다 — 테스트가
+    저장소를 오염시키는 실제 사고(main에 a.txt가 잘못 재커밋된 사고)의
+    근본 원인. 모든 GIT_ 접두 환경변수를 제거해 cwd만으로 대상이 결정되게
+    한다.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
+def _run_git(args: list[str], cwd: Path) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, env=_clean_git_env())
 
 
 class TestCheckSubject:
@@ -194,24 +214,16 @@ class TestGetCommitSubjects:
     def test_returns_sha_and_subject_pairs(self, tmp_path):
         repo = tmp_path / "repo"
         repo.mkdir()
-        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        _run_git(["init", "-q"], cwd=repo)
+        _run_git(["config", "user.email", "test@example.com"], cwd=repo)
+        _run_git(["config", "user.name", "Test"], cwd=repo)
         (repo / "a.txt").write_text("1", encoding="utf-8")
-        subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
-        subprocess.run(
-            ["git", "commit", "-q", "-m", "✨ feat(x): first"],
-            cwd=repo,
-            check=True,
-        )
-        subprocess.run(["git", "branch", "base"], cwd=repo, check=True)
+        _run_git(["add", "a.txt"], cwd=repo)
+        _run_git(["commit", "-q", "-m", "✨ feat(x): first"], cwd=repo)
+        _run_git(["branch", "base"], cwd=repo)
         (repo / "a.txt").write_text("2", encoding="utf-8")
-        subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
-        subprocess.run(
-            ["git", "commit", "-q", "-m", "feat(y): second, no gitmoji"],
-            cwd=repo,
-            check=True,
-        )
+        _run_git(["add", "a.txt"], cwd=repo)
+        _run_git(["commit", "-q", "-m", "feat(y): second, no gitmoji"], cwd=repo)
 
         commits = check_commit_gitmoji.get_commit_subjects("base..HEAD", cwd=repo)
 
@@ -221,24 +233,96 @@ class TestGetCommitSubjects:
         assert subject == "feat(y): second, no gitmoji"
 
 
+class TestGitEnvIsolation:
+    """GIT_* 환경변수 누출로부터 테스트 격리를 검증한다.
+
+    git이 훅(pre-commit/pre-push)을 실행할 때 자식 프로세스 환경에 주입하는
+    GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE을 시뮬레이션해, `_run_git`이
+    그 환경 아래에서도 여전히 `cwd`가 가리키는 저장소(tmp_path)를 대상으로
+    동작하고 앰비언트 저장소는 건드리지 않는지 확인한다. `_run_git`을
+    사용하지 않고 원시 `subprocess.run`으로 되돌아가면 이 테스트가 실패한다.
+    """
+
+    def test_run_git_ignores_ambient_git_dir_env_leak(self, tmp_path, monkeypatch):
+        # 앰비언트(오염원) 저장소 — 훅을 실행시킨 "진짜" 저장소를 흉내낸다.
+        ambient_repo = tmp_path / "ambient"
+        ambient_repo.mkdir()
+        _run_git(["init", "-q"], cwd=ambient_repo)
+        _run_git(["config", "user.email", "test@example.com"], cwd=ambient_repo)
+        _run_git(["config", "user.name", "Test"], cwd=ambient_repo)
+        (ambient_repo / "seed.txt").write_text("seed", encoding="utf-8")
+        _run_git(["add", "seed.txt"], cwd=ambient_repo)
+        _run_git(["commit", "-q", "-m", "✨ feat(x): ambient seed"], cwd=ambient_repo)
+        ambient_head_before = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ambient_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=_clean_git_env(),
+        ).stdout.strip()
+
+        # 격리 대상(진짜 테스트 저장소).
+        isolated_repo = tmp_path / "isolated"
+        isolated_repo.mkdir()
+
+        # git 훅이 자식 프로세스에 주입하는 환경을 시뮬레이션: GIT_DIR/
+        # GIT_WORK_TREE/GIT_INDEX_FILE이 ambient_repo를 가리키도록 오염시킨다.
+        monkeypatch.setenv("GIT_DIR", str(ambient_repo / ".git"))
+        monkeypatch.setenv("GIT_WORK_TREE", str(ambient_repo))
+        monkeypatch.setenv("GIT_INDEX_FILE", str(ambient_repo / ".git" / "index"))
+
+        _run_git(["init", "-q"], cwd=isolated_repo)
+        _run_git(["config", "user.email", "test@example.com"], cwd=isolated_repo)
+        _run_git(["config", "user.name", "Test"], cwd=isolated_repo)
+        (isolated_repo / "a.txt").write_text("1", encoding="utf-8")
+        _run_git(["add", "a.txt"], cwd=isolated_repo)
+        _run_git(["commit", "-q", "-m", "✨ feat(x): isolated"], cwd=isolated_repo)
+
+        # 커밋이 isolated_repo에 실제로 존재해야 한다. get_commit_subjects는
+        # (이번 수정 범위 밖인) 원시 subprocess.run을 쓰므로 여전히 앰비언트
+        # GIT_* 누출에 취약하다 — 검증에는 _clean_git_env를 명시 적용한
+        # 별도 git log 호출을 사용해 "격리 대상 저장소가 실제로 커밋을
+        # 받았는가"만 순수하게 확인한다.
+        log_result = subprocess.run(
+            ["git", "log", "--format=%s"],
+            cwd=isolated_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=_clean_git_env(),
+        )
+        assert "✨ feat(x): isolated" in log_result.stdout
+
+        # ambient_repo는 GIT_DIR/GIT_WORK_TREE 누출에도 불구하고 절대
+        # 건드려지지 않아야 한다 — HEAD가 그대로여야 하고, isolated_repo가
+        # 만든 파일이 새어 들어가서는 안 된다.
+        ambient_head_after = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ambient_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=_clean_git_env(),
+        ).stdout.strip()
+        assert ambient_head_after == ambient_head_before
+        assert not (ambient_repo / "a.txt").exists()
+
+
 class TestMain:
     def test_main_reports_failure_exit_code_on_violation(self, tmp_path, capsys):
         repo = tmp_path / "repo"
         repo.mkdir()
-        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        _run_git(["init", "-q"], cwd=repo)
+        _run_git(["config", "user.email", "test@example.com"], cwd=repo)
+        _run_git(["config", "user.name", "Test"], cwd=repo)
         (repo / "a.txt").write_text("1", encoding="utf-8")
-        subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
-        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
-        subprocess.run(["git", "branch", "base"], cwd=repo, check=True)
+        _run_git(["add", "a.txt"], cwd=repo)
+        _run_git(["commit", "-q", "-m", "init"], cwd=repo)
+        _run_git(["branch", "base"], cwd=repo)
         (repo / "a.txt").write_text("2", encoding="utf-8")
-        subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
-        subprocess.run(
-            ["git", "commit", "-q", "-m", "feat(SPEC-X): gitmoji 없는 feat"],
-            cwd=repo,
-            check=True,
-        )
+        _run_git(["add", "a.txt"], cwd=repo)
+        _run_git(["commit", "-q", "-m", "feat(SPEC-X): gitmoji 없는 feat"], cwd=repo)
         pyproject_path = repo / "pyproject.toml"
         pyproject_path.write_text(
             "[tool.semantic_release.commit_parser_options]\n"
@@ -257,20 +341,16 @@ class TestMain:
     def test_main_reports_success_exit_code_when_clean(self, tmp_path, capsys):
         repo = tmp_path / "repo"
         repo.mkdir()
-        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        _run_git(["init", "-q"], cwd=repo)
+        _run_git(["config", "user.email", "test@example.com"], cwd=repo)
+        _run_git(["config", "user.name", "Test"], cwd=repo)
         (repo / "a.txt").write_text("1", encoding="utf-8")
-        subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
-        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
-        subprocess.run(["git", "branch", "base"], cwd=repo, check=True)
+        _run_git(["add", "a.txt"], cwd=repo)
+        _run_git(["commit", "-q", "-m", "init"], cwd=repo)
+        _run_git(["branch", "base"], cwd=repo)
         (repo / "a.txt").write_text("2", encoding="utf-8")
-        subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
-        subprocess.run(
-            ["git", "commit", "-q", "-m", "✨ feat(SPEC-X): gitmoji 있는 feat"],
-            cwd=repo,
-            check=True,
-        )
+        _run_git(["add", "a.txt"], cwd=repo)
+        _run_git(["commit", "-q", "-m", "✨ feat(SPEC-X): gitmoji 있는 feat"], cwd=repo)
         pyproject_path = repo / "pyproject.toml"
         pyproject_path.write_text(
             "[tool.semantic_release.commit_parser_options]\n"
