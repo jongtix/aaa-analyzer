@@ -11,6 +11,7 @@ from prometheus_client import CollectorRegistry, generate_latest
 
 from analyzer.inference.metrics import (
     INFERENCE_CYCLE_DURATION_NAME,
+    INFERENCE_LAST_CYCLE_NAME,
     INFERENCE_SIGNALS_TOTAL_NAME,
     INFERENCE_SKIP_TOTAL_NAME,
     InferenceMetrics,
@@ -25,11 +26,12 @@ class TestInferenceMetricsNaming:
     붙인다. AC-AIF-021이 요구하는 `analyzer_inference_*` 문자열은 부분
     문자열로 그대로 포함되므로 `/metrics` 조회 검증도 충족한다."""
 
-    def test_all_three_metrics_follow_codebase_prefix(self):
+    def test_all_four_metrics_follow_codebase_prefix(self):
         for name in (
             INFERENCE_SKIP_TOTAL_NAME,
             INFERENCE_SIGNALS_TOTAL_NAME,
             INFERENCE_CYCLE_DURATION_NAME,
+            INFERENCE_LAST_CYCLE_NAME,
         ):
             assert name.startswith("aaa_analyzer_inference_")
 
@@ -212,6 +214,56 @@ class TestInferenceMetricsCycleDuration:
         assert at_ceiling == 1.0
 
 
+class TestInferenceMetricsLastCycleGauge:
+    """SPEC-OBSV-ANALYZER-DEADMAN-001 REQ-DMR-001/005: 데드맨 스위치
+    재설계가 도입한 재기동-생존 게이지."""
+
+    def test_record_last_cycle_sets_value_for_market(self):
+        registry = CollectorRegistry()
+        metrics = InferenceMetrics(registry=registry)
+
+        metrics.record_last_cycle(market="domestic", epoch_seconds=1_758_000_000.0)
+
+        value = registry.get_sample_value(INFERENCE_LAST_CYCLE_NAME, {"market": "domestic"})
+        assert value == 1_758_000_000.0
+
+    def test_markets_are_recorded_independently(self):
+        registry = CollectorRegistry()
+        metrics = InferenceMetrics(registry=registry)
+
+        metrics.record_last_cycle(market="domestic", epoch_seconds=1_758_000_000.0)
+        metrics.record_last_cycle(market="overseas", epoch_seconds=1_758_003_600.0)
+
+        domestic = registry.get_sample_value(INFERENCE_LAST_CYCLE_NAME, {"market": "domestic"})
+        overseas = registry.get_sample_value(INFERENCE_LAST_CYCLE_NAME, {"market": "overseas"})
+        assert domestic == 1_758_000_000.0
+        assert overseas == 1_758_003_600.0
+
+    def test_re_recording_overwrites_the_previous_value(self):
+        """단일-프로세스 게이지 자체는 그냥 `.set()`이다 — 재기동-생존은
+        `multiprocess_mode="max"`(REQ-DMR-005)가 pid 파일 병합 단계에서
+        제공하는 속성이며, 여기서는 단일 프로세스 내 최신값 덮어쓰기만
+        확인한다(멀티프로세스 병합 자체는 test_api.py 복원-시뮬레이션이
+        검증한다)."""
+        registry = CollectorRegistry()
+        metrics = InferenceMetrics(registry=registry)
+
+        metrics.record_last_cycle(market="domestic", epoch_seconds=1_758_000_000.0)
+        metrics.record_last_cycle(market="domestic", epoch_seconds=1_758_003_600.0)
+
+        value = registry.get_sample_value(INFERENCE_LAST_CYCLE_NAME, {"market": "domestic"})
+        assert value == 1_758_003_600.0
+
+    def test_gauge_is_registered_with_max_multiprocess_mode(self):
+        """REQ-DMR-005의 병합 의미론이 실제로 `multiprocess_mode="max"`로
+        선언돼 있는지 직접 확인한다 — `orchestration/metrics.py`의
+        `last_success_timestamp`/`model_stale` 게이지와 동일 관례."""
+        registry = CollectorRegistry()
+        metrics = InferenceMetrics(registry=registry)
+
+        assert metrics.inference_last_cycle._multiprocess_mode == "max"  # noqa: SLF001
+
+
 class TestInferenceMetricsRegistryIsolation:
     """AC-AIF-021 스모크: 주입 레지스트리에서 실제 스크레이프 가능한지 확인
     (`TrainingMetrics` 테스트의 동일 패턴 계승)."""
@@ -222,12 +274,14 @@ class TestInferenceMetricsRegistryIsolation:
         metrics.record_skip(market="domestic", horizon=20, reason=SkipReason.NO_MANIFEST)
         metrics.record_signal(market="domestic", horizon=20, signal_class="BUY")
         metrics.observe_cycle_duration(market="domestic", seconds=1.0)
+        metrics.record_last_cycle(market="domestic", epoch_seconds=1_758_000_000.0)
 
         output = generate_latest(registry).decode("utf-8")
 
         assert INFERENCE_SKIP_TOTAL_NAME in output
         assert INFERENCE_SIGNALS_TOTAL_NAME in output
         assert INFERENCE_CYCLE_DURATION_NAME in output
+        assert INFERENCE_LAST_CYCLE_NAME in output
 
     def test_uses_injected_registry_not_default(self):
         from prometheus_client import REGISTRY

@@ -25,17 +25,29 @@ AC-AIF-021도 그 이름으로 `/metrics` 조회를 검증하지만, 실제 코�
   (`training/boundaries.GRADE_ORDER`).
 - ``aaa_analyzer_inference_cycle_duration_seconds{market}`` (Histogram) —
   추론 사이클 소요 시간.
+- ``aaa_analyzer_inference_last_cycle_seconds{market}`` (Gauge) —
+  시장별 가장 최근 성공 완료된 추론 사이클의 UTC epoch 초
+  (SPEC-OBSV-ANALYZER-DEADMAN-001 REQ-DMR-001). `multiprocess_mode="max"`로
+  등록한다 — 이 게이지 값은 단조 증가하는 UTC epoch 초이므로, 재기동으로
+  `PROMETHEUS_MULTIPROC_DIR`의 잔존 pid db 파일이 정리된 뒤에도 (a) Redis
+  warm-start 기준선(부모 자신의 pid db 파일)과 (b) 그 이후 자식 프로세스가
+  기록한 실제 완료 시각 중 항상 더 최근 값(=최댓값)이 병합 결과로 노출된다
+  (REQ-DMR-005). `aaa-analyzer/src/analyzer/inference/last_cycle.py`가 이
+  게이지의 write(자식)/warm-start(부모) 양쪽 배선을 소유한다.
 """
 
 from __future__ import annotations
 
-from prometheus_client import REGISTRY, CollectorRegistry, Counter, Histogram
+from prometheus_client import REGISTRY, CollectorRegistry, Counter, Gauge, Histogram
 
 from analyzer.inference.resolution import SkipReason
 
 INFERENCE_SKIP_TOTAL_NAME = "aaa_analyzer_inference_skip_total"
 INFERENCE_SIGNALS_TOTAL_NAME = "aaa_analyzer_inference_signals_total"
 INFERENCE_CYCLE_DURATION_NAME = "aaa_analyzer_inference_cycle_duration_seconds"
+INFERENCE_LAST_CYCLE_NAME = "aaa_analyzer_inference_last_cycle_seconds"
+"""SPEC-OBSV-ANALYZER-DEADMAN-001 REQ-DMR-001 — 데드맨 스위치 재설계가
+`absent_over_time`을 대체하는 재기동-생존 신호로 도입한 게이지 이름."""
 
 CYCLE_DURATION_BUCKETS: tuple[float, ...] = (
     30.0,
@@ -90,6 +102,13 @@ class InferenceMetrics:
             buckets=CYCLE_DURATION_BUCKETS,
             registry=target_registry,
         )
+        self.inference_last_cycle = Gauge(
+            INFERENCE_LAST_CYCLE_NAME,
+            "시장별 가장 최근 성공 완료된 추론 사이클의 UTC epoch 초",
+            ["market"],
+            registry=target_registry,
+            multiprocess_mode="max",
+        )
 
     def record_skip(self, *, market: str, horizon: int, reason: SkipReason | str) -> None:
         """REQ-AIF-130 (a): 스킵 1건을 사유 레이블로 구분해 기록한다.
@@ -117,3 +136,10 @@ class InferenceMetrics:
     def observe_cycle_duration(self, *, market: str, seconds: float) -> None:
         """REQ-AIF-130 (c): 시장 1회 추론 사이클 소요 시간을 관측한다."""
         self.inference_cycle_duration.labels(market=market).observe(seconds)
+
+    def record_last_cycle(self, *, market: str, epoch_seconds: float) -> None:
+        """REQ-DMR-001: 시장별 마지막 성공 완료 사이클의 UTC epoch 초를
+        게이지에 기록한다. 호출부(`inference/last_cycle.py`)가 write(자식
+        프로세스 사이클 완료)와 warm-start(부모 프로세스 부팅) 양쪽에서
+        이 메서드를 공유한다 — 값의 출처만 다를 뿐 기록 방식은 동일하다."""
+        self.inference_last_cycle.labels(market=market).set(epoch_seconds)

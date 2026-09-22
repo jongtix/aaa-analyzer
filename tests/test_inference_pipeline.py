@@ -9,6 +9,7 @@ INSERT→발행→밴드 스윕 순서 계약)만 검증한다.
 
 from __future__ import annotations
 
+import time
 from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -217,6 +218,7 @@ class _FakeMetrics:
         self.skip_calls: list[tuple[str, int, SkipReason | str]] = []
         self.signal_calls: list[tuple[str, int, str]] = []
         self.cycle_duration_calls: list[tuple[str, float]] = []
+        self.last_cycle_calls: list[tuple[str, float]] = []
 
     def record_skip(self, *, market: str, horizon: int, reason: SkipReason | str) -> None:
         self.skip_calls.append((market, horizon, reason))
@@ -226,6 +228,9 @@ class _FakeMetrics:
 
     def observe_cycle_duration(self, *, market: str, seconds: float) -> None:
         self.cycle_duration_calls.append((market, seconds))
+
+    def record_last_cycle(self, *, market: str, epoch_seconds: float) -> None:
+        self.last_cycle_calls.append((market, epoch_seconds))
 
 
 class _FakeBoundariesArtifact:
@@ -612,6 +617,98 @@ class TestRunMarketInferenceMetricsLifecycle:
         assert _FakeMetrics.instantiation_count == 1
         assert len(metrics.cycle_duration_calls) == 1
         assert metrics.cycle_duration_calls[0][0] == "domestic"
+
+
+class TestRunMarketInferenceLastCycleWiring:
+    """SPEC-OBSV-ANALYZER-DEADMAN-001 REQ-DMR-002: 사이클 완료 시
+    `record_cycle_completion()`이 정확히 1회 호출되어 게이지 갱신 + Redis
+    영속화가 함께 수행된다 — `observe_cycle_duration()`과 동일한 시점(사이클
+    종료 직후, `finally` 이전)에 배선된다."""
+
+    def test_record_last_cycle_called_once_after_cycle_completion(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        metrics = _patch_common(monkeypatch, universe_rows=[])
+        monkeypatch.setattr(
+            pipeline_module,
+            "resolve_serving_targets",
+            lambda *_a, **_k: SkipReason.NO_MANIFEST,
+        )
+
+        before = time.time()
+        run_market_inference(
+            "domestic",
+            trace_id="trace-lastcycle-1",
+            models_root=Path("/models"),
+            trade_date=date(2026, 9, 10),
+        )
+        after = time.time()
+
+        assert len(metrics.last_cycle_calls) == 1
+        market, epoch_seconds = metrics.last_cycle_calls[0]
+        assert market == "domestic"
+        assert before <= epoch_seconds <= after
+
+    def test_markets_are_recorded_independently(self, monkeypatch: pytest.MonkeyPatch):
+        metrics = _patch_common(monkeypatch, universe_rows=[])
+        monkeypatch.setattr(
+            pipeline_module,
+            "resolve_serving_targets",
+            lambda *_a, **_k: SkipReason.NO_MANIFEST,
+        )
+
+        run_market_inference(
+            "overseas",
+            trace_id="trace-lastcycle-2",
+            models_root=Path("/models"),
+            trade_date=date(2026, 9, 10),
+        )
+
+        assert len(metrics.last_cycle_calls) == 1
+        assert metrics.last_cycle_calls[0][0] == "overseas"
+
+    def test_cycle_still_completes_when_redis_save_raises(self, monkeypatch: pytest.MonkeyPatch):
+        """REQ-DMR-004 fail-open을 파이프라인 경유로 재확인: `redis_client`가
+        `RedisError`를 던져도 사이클 자체는 정상 완주(예외 미전파)한다."""
+        import redis.exceptions
+
+        fake_engine = MagicMock(name="engine")
+
+        class _FailingRedis:
+            def set(self, *_a, **_k):
+                raise redis.exceptions.ConnectionError("연결 불가(시뮬레이션)")
+
+            def get(self, *_a, **_k):
+                raise redis.exceptions.ConnectionError("연결 불가(시뮬레이션)")
+
+            def close(self) -> None:
+                pass
+
+        fake_redis = _FailingRedis()
+        monkeypatch.setattr(pipeline_module, "build_engine", lambda *_a, **_k: fake_engine)
+        monkeypatch.setattr(pipeline_module, "build_redis_client", lambda *_a, **_k: fake_redis)
+        monkeypatch.setattr(pipeline_module, "get_db_config", lambda: object())
+        monkeypatch.setattr(pipeline_module, "get_inference_config", lambda: object())
+        monkeypatch.setattr(
+            pipeline_module, "load_grade_boundaries", lambda: _FakeBoundariesArtifact()
+        )
+        monkeypatch.setattr(pipeline_module, "fetch_market_calendar", lambda *_a, **_k: MagicMock())
+        monkeypatch.setattr(
+            pipeline_module, "fetch_stock_universe", lambda *_a, **_k: _universe_df([])
+        )
+        monkeypatch.setattr(pipeline_module, "InferenceMetrics", lambda *_a, **_k: _FakeMetrics())
+        monkeypatch.setattr(
+            pipeline_module, "resolve_serving_targets", lambda *_a, **_k: SkipReason.NO_MANIFEST
+        )
+
+        outcome = run_market_inference(
+            "domestic",
+            trace_id="trace-lastcycle-3",
+            models_root=Path("/models"),
+            trade_date=date(2026, 9, 10),
+        )
+
+        assert outcome.skipped_combinations == 2
 
 
 class TestRunMarketInferenceResourceCleanup:

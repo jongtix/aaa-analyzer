@@ -35,7 +35,10 @@ import uvicorn
 from analyzer.api.app import create_app
 from analyzer.common.logging import get_logger
 from analyzer.common.trace import new_trace_id
-from analyzer.inference.config import get_inference_config
+from analyzer.inference.config import InferenceConfig, get_inference_config
+from analyzer.inference.last_cycle import AnalyzerLastCycleRepository, warm_start_last_cycle
+from analyzer.inference.metrics import InferenceMetrics
+from analyzer.inference.redis_client import build_redis_client
 from analyzer.orchestration.config import AutomationConfig, get_automation_config
 from analyzer.orchestration.consumer import StreamConsumer
 from analyzer.orchestration.gate_adapter import build_gate_promotion_fn, compute_data_as_of
@@ -258,6 +261,40 @@ def _bootstrap_prometheus_multiproc_dir() -> None:
         stale_dump.unlink()
 
 
+_INFERENCE_LAST_CYCLE_MARKETS: tuple[str, ...] = ("domestic", "overseas")
+"""SPEC-OBSV-ANALYZER-DEADMAN-001 REQ-DMR-003 warm-start 대상 시장 —
+`inference/pipeline.py`가 사이클을 발행하는 두 시장과 동일 집합이다."""
+
+
+def _warm_start_inference_last_cycle(config: InferenceConfig) -> None:
+    """REQ-DMR-003: 상주 부모 프로세스 기동 시 두 시장 각각의 Redis 영속
+    완료 시각을 조회해 `aaa_analyzer_inference_last_cycle_seconds` 게이지를
+    warm-start한다.
+
+    **호출 순서가 중요하다** — `_bootstrap_prometheus_multiproc_dir()` 이후,
+    `/metrics`가 서빙 가능해지기 전(uvicorn 기동 전)에 호출돼야 한다. 순서가
+    바뀌면 부트스트랩이 이 함수가 방금 쓴 부모 자신의 pid db 파일까지
+    삭제해버려 warm-start가 무의미해진다(spec.md §1.1).
+
+    `InferenceMetrics()`는 이 함수 안에서 정확히 1회 생성된다 — 부모
+    프로세스 자신의 pid에 대응하는 게이지 값을 만들어, `multiprocess_mode
+    ="max"`(REQ-DMR-005) 병합 시 이 warm-start 기준선과 그 이후 자식
+    프로세스가 기록하는 실제 완료 시각 중 더 최근 값이 노출되게 한다.
+
+    Redis 조회 실패(연결 불가, 손상값 등)는 예외를 전파하지 않고 로그
+    경고 후 계속 진행한다(`warm_start_last_cycle()`의 비차단 관례,
+    `BatchMetricsWarmStarter` 동일 원칙 계승) — 기동 자체를 막지 않는다.
+    """
+    metrics = InferenceMetrics()
+    redis_client = build_redis_client(config)
+    try:
+        repository = AnalyzerLastCycleRepository(redis_client)
+        for market in _INFERENCE_LAST_CYCLE_MARKETS:
+            warm_start_last_cycle(metrics, repository, market=market)
+    finally:
+        redis_client.close()
+
+
 async def run(host: str = "0.0.0.0", port: int = 8000) -> None:
     """상주 부모 프로세스를 시작한다: FastAPI 앱 + cron 잡 + 스트림 컨슈머 배선.
 
@@ -286,7 +323,8 @@ async def run(host: str = "0.0.0.0", port: int = 8000) -> None:
 
     # REQ-AIF-020: 컨슈머는 무한 폴링 루프이므로 await로 붙잡지 않고 백그라운드
     # asyncio 태스크로 기동한다 — 같은 이벤트 루프에서 uvicorn과 공존한다.
-    consumer = StreamConsumer(config=get_inference_config())
+    inference_config = get_inference_config()
+    consumer = StreamConsumer(config=inference_config)
     consumer_task = asyncio.create_task(consumer.start())
 
     logger.info(
@@ -295,6 +333,10 @@ async def run(host: str = "0.0.0.0", port: int = 8000) -> None:
     )
 
     _bootstrap_prometheus_multiproc_dir()
+    # SPEC-OBSV-ANALYZER-DEADMAN-001 REQ-DMR-003: 부트스트랩(잔존 pid db
+    # 파일 삭제) 다음, `/metrics`가 서빙 가능해지기 전에 warm-start한다 —
+    # 순서를 바꾸면 부트스트랩이 이 warm-start가 쓴 값을 도로 지운다.
+    _warm_start_inference_last_cycle(inference_config)
 
     app = create_app()
     uvicorn_config = uvicorn.Config(app, host=host, port=port, log_level="info")
