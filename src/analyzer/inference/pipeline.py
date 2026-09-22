@@ -28,6 +28,7 @@ from analyzer.data.repository import (
 from analyzer.inference.boundaries_store import load_grade_boundaries
 from analyzer.inference.config import get_inference_config
 from analyzer.inference.features import assemble_inference_features_batch
+from analyzer.inference.last_cycle import AnalyzerLastCycleRepository, record_cycle_completion
 from analyzer.inference.metrics import InferenceMetrics
 from analyzer.inference.outcome import InferenceOutcome
 from analyzer.inference.predict import predict_point_models, predict_quantile_models
@@ -290,6 +291,18 @@ def run_market_inference(
                 processed += 1
 
         metrics.observe_cycle_duration(market=market, seconds=time.monotonic() - start)
+        # SPEC-OBSV-ANALYZER-DEADMAN-001 REQ-DMR-002: 사이클이 성공적으로
+        # 완료된 시점(예외 없이 이 지점에 도달)에 완료 시각(UTC epoch 초)을
+        # 게이지 + Redis 양쪽에 기록한다. `redis_client`는 위에서 이미
+        # 구성돼 있고 아직 `finally`에서 close되지 않았으므로 그대로
+        # 재사용한다(신규 커넥션을 만들지 않는다).
+        last_cycle_repository = AnalyzerLastCycleRepository(redis_client)
+        record_cycle_completion(
+            metrics,
+            last_cycle_repository,
+            market=market,
+            epoch_seconds=time.time(),
+        )
     finally:
         engine.dispose()
         redis_client.close()
