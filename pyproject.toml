@@ -61,6 +61,9 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pyright]
 include = ["src", "tests"]
+# tests/test_check_commit_gitmoji.py가 sys.path.insert로 scripts/를 로드해
+# import하므로, pyright도 같은 경로로 심볼을 찾도록 등록한다.
+extraPaths = ["scripts"]
 pythonVersion = "3.14"
 typeCheckingMode = "basic"
 
