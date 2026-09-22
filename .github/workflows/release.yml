@@ -47,6 +47,33 @@ jobs:
         # 배선됨(REQ-ANALYZER-FOUNDATION-025).
         run: uv run pytest -m "not integration"
 
+  # 커밋 gitmoji 게이트: python-semantic-release commit_parser="emoji"는
+  # 커밋 제목 맨 앞에 등록된 gitmoji가 없으면 conventional-commit 타입
+  # (feat/fix/perf)이 맞아도 "Other"로 분류해 조용히 버전 범프를 건너뛴다.
+  # 실제 사고: feat(SPEC-OBSV-ANALYZER-DEADMAN-001) 커밋이 gitmoji 없이
+  # main에 머지되어 "No release will be made"로 판정, Docker 빌드·NAS 배포가
+  # 전혀 트리거되지 않았다(CI 전체 green, 실패 신호 없음). PR 시점에 차단해야
+  # 하므로 push가 아닌 pull_request에서만 실행한다(merge 후에는 이미 늦다).
+  # 순수 stdlib 스크립트라 uv sync 없이 시스템 python3만으로 충분히 빠르게
+  # 독립 실패시킬 수 있다.
+  commit-gitmoji-gate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Fetch base branch (origin/main)
+        run: git fetch origin main
+
+      - name: Check commit gitmoji vs semantic-release gate
+        run: python3 scripts/check_commit_gitmoji.py origin/main..HEAD
+
   release:
     needs: test
     if: github.event_name == 'push'
