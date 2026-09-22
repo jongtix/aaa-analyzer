@@ -25,6 +25,7 @@ semantic-release 버전 범프에 관여하는 conventional-commit 타입(`feat`
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -154,12 +155,19 @@ def get_commit_subjects(commit_range: str, *, cwd: Path | None = None) -> list[t
     `--no-merges`는 semantic-release의 `ignore_merge_commits=True` 기본값과
     동일한 방향으로 머지 커밋을 검사 대상에서 제외한다.
     """
+    # GIT_DIR/GIT_WORK_TREE 등 GIT_ 접두 환경변수가 앰비언트에 존재하면(예:
+    # 이 프로세스가 git 훅 안에서 실행 중일 때) git이 `cwd`를 무시하고 그
+    # 변수가 가리키는 저장소를 대상으로 동작한다. 명시적으로 지정한
+    # `cwd`(테스트의 임시 저장소 포함)가 항상 우선하도록 GIT_ 환경변수를
+    # 제거한 환경으로 호출한다.
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     result = subprocess.run(
         ["git", "log", "--no-merges", f"--format=%h{_RECORD_SEP}%s", commit_range],
         cwd=cwd if cwd is not None else REPO_ROOT,
         capture_output=True,
         text=True,
         check=True,
+        env=clean_env,
     )
     commits: list[tuple[str, str]] = []
     for line in result.stdout.splitlines():
