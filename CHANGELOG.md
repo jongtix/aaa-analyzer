@@ -22,6 +22,14 @@
 
 ### ✨
 
+- 추론 사이클 완료 시각 게이지 신설 + Redis 영속화 warm-start 배선 — 데드맨 알림 오탐 재설계의 관측 기반 (SPEC-OBSV-ANALYZER-DEADMAN-001 M1/M2, REQ-DMR-001~005)
+  - `aaa_analyzer_inference_last_cycle_seconds{market}` Gauge 신규(`inference/metrics.py`) — 시장별 마지막 추론 사이클 완료 시각(UTC epoch 초) 기록. `multiprocess_mode="max"` 채택(기존 `TrainingMetrics.last_success_timestamp`/`model_stale` 관례 계승)
+  - `inference/last_cycle.py` 신규 — `AnalyzerLastCycleRepository`(Redis 키 `observability:analyzer:last-cycle:{market}`, TTL 없음) + `record_cycle_completion()`(write, 자식 프로세스)/`warm_start_last_cycle()`(read, 부모 기동 시). aaa-collector `BatchLastLoadRepository`/`BatchMetricsWarmStarter` 패턴(SPEC-COLLECTOR-WARMSTART-REDIS-001) 계승
+  - `api/main.py`의 `_bootstrap_prometheus_multiproc_dir()` 직후 warm-start 호출 배선 — `PROMETHEUS_MULTIPROC_DIR`가 재기동마다 초기화돼 게이지가 완전히 소실되는 문제를 Redis 영속값으로 복원(재기동 시뮬레이션 테스트로 실증)
+  - fail-open — Redis 연결 실패/손상값을 흡수하고 예외를 전파하지 않음(`/metrics` 무중단)
+  - 검증: `uv run pytest -m "not integration"` 1052 passed, 커버리지 97.67%, `ruff check`/`pyright` clean
+  - main 반영: 커밋 `4259ae0`(PR #77/#78/#79 경유, gitmoji 게이트·GIT_* env 누출 결함 별건 해소 포함) → `v0.25.2` 태그로 NAS 배포, 라이브 게이지 값 정상 기록 확인(2026-09-25, `market="domestic"`/`"overseas"` 양쪽)
+  - 후속(aaa-infra): 이 게이지를 앵커로 삼아 `AnalyzerInferenceDeadman` vmalert 룰을 재설계하고 라우팅을 활성화 — 상세는 aaa-infra CHANGELOG 참고
 - 모델 영속화 경로 전면에 `.meta.json` 사이드카 배선 — standing-gate/주간 재학습/분위수 모델 커버리지 결함 수정 (SPEC-ANALYZER-TRAIN-META-001 M1-M7b/M6a/M6b, REQ-TM-001~011, [aaa-infra#163](https://github.com/jongtix/aaa-infra/issues/163))
   - **근본원인**: `.meta.json` 사이드카 WRITER가 캠페인 배포 경로(`campaign.py::activate_market_horizon_combo()`)에만 배선되어 있었고, 주간 재학습 저장 경로(`train.py::_persist_trained_models()`)에는 배선된 적이 없었다 — `promotion_gate.py::evaluate_and_promote()`는 모델 파일을 저장하지 않는 계층이라 수정 지점이 아니었다(추정 귀속 TRAIN-GATE-001/TRAIN-AUTOMATION-001은 방향은 맞으나 부정확했음이 research.md로 확인). 분위수 모델(q10/q90)은 **어떤 저장 경로에서도** `.meta.json`을 받은 적이 없는 별도의 구조적 공백이었다
   - M1: 축소 사이드카 스키마 확정, `campaign_metrics.write_sidecar_metadata()` 키워드 전용 인자로 재정의(REQ-TM-004/005/005b)
