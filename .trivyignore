@@ -5,6 +5,13 @@
 # (2026-09-17 v0.24.1: 이 절차를 놓치고 태그 이동·빈 커밋으로 우회하다 실패 — 상세는
 #  aaa/.claude/rules/aaa/project-instructions.md § Git Rules)
 
+# [커밋 규약] 보안/CVE 대응 커밋(base 이미지 패키지 타겟 업그레이드, .trivyignore 예외
+# 등록·해제, 의존성 CVE 패치 등)은 반드시 `fix` 타입으로 커밋한다 — `chore`로 커밋하면
+# semantic-release가 릴리스를 만들지 않아 Docker 빌드/Trivy 재스캔/배포가 전혀 트리거되지
+# 않는다(vyc-backend CVE-2026-93990 사례, 2026-09-25: `chore` 커밋으로 main 머지했으나
+# 릴리스 미발생으로 수정이 실제 배포까지 이어지지 못함). Conventional Commits/semantic-release
+# 업계 관행도 동일 — 취약점 제거·완화는 `fix`.
+
 # CVE-2026-53615 | util-linux 계열 9패키지(bsdutils/libblkid1/liblastlog2-2/libmount1/libsmartcols1/libuuid1/login/mount/util-linux) HIGH
 # 사유: 상류-지연(upstream-lag) — Debian trixie에 수정판 2.41.5-0+deb13u1 게시됨,
 #       python:3.14-slim base(2026-08-05 빌드)가 아직 이를 반영하지 않은 상태. 레포 내 교정 수단 없음(REQ-CVE-016).
