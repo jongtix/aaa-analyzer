@@ -22,7 +22,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
 
@@ -105,7 +105,7 @@ jobs:
       # collector .releaserc.js와 동일한 gitmoji+conventional 매핑을
       # [tool.semantic_release.commit_parser_options]로 재현(✨→minor, 🐛/⚡→patch).
       - name: Python Semantic Release
-        uses: python-semantic-release/python-semantic-release@9a026e9303981c866c3425723009becb2437c757 # v10.6.2
+        uses: python-semantic-release/python-semantic-release@b700dbeb1f431a0fcc30a79f3f0869407fe07278 # v10.7.0
         with:
           github_token: ${{ steps.app-token.outputs.token }}
           git_committer_name: "github-actions[bot]"
