@@ -14,16 +14,23 @@ predict_point_models_batch()`로 한 번만 로드한다. score/등급 파생은
 (둘 다 PRESERVE 대상 순수 함수 위임)를 그대로 재사용하며 별도 변형을
 만들지 않는다(REQ-AIF-111, plan.md §D).
 
-모델을 실제로 로드(=예측)한 직후 `resolution.detect_manifest_race()`로
-학습 잡과의 레이스를 재확인한다(design.md §7) — 레이스가 감지되면 이번
-스윕 결과 전체를 폐기하고 `SkipReason.MANIFEST_RACE`로 라우팅한다.
+1% 조각 병합 뒤 살아남은 내부 경계는 격자 칸 안에서 이분 탐색으로 정련해,
+인접 밴드가 경계 가격 하나를 공유하는 연속 파티션으로 저장한다
+(SPEC-ANALYZER-INFER-002 REQ-AIR-001~008). 정련 평가는 격자 평가와 같은
+피처 조립·예측·score 파생 경로를 쓴다.
+
+격자·정련 평가(마지막 모델 로드)를 모두 마친 뒤 `resolution.
+detect_manifest_race()`로 학습 잡과의 레이스를 재확인한다(design.md §7,
+REQ-AIR-007) — 레이스가 감지되면 이번 스윕 결과 전체를 폐기하고
+`SkipReason.MANIFEST_RACE`로 라우팅한다.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -98,6 +105,15 @@ overseas D60은 별개로 발견된 프로덕션 결함(챔피언 모델에 `.me
 사이드카 부재 → FEATURE_REGISTRY 전체 폴백 → 해외 수급 데이터 부재와
 충돌, `.moai/specs/SPEC-ANALYZER-INFER-001/progress.md` M7 항목 참조)으로
 인해 실측 불가 — Gap으로 보고."""
+
+REFINE_MAX_ITERATIONS = 8
+"""REQ-AIR-005 확정값(SPEC-ANALYZER-INFER-002 plan.md PD-2) — 경계 하나당 이분
+탐색 최대 반복 수. 격자 칸이 전일 종가의 0.5%로 고정이므로 최종 탐색 구간
+폭은 0.5%/2⁸ ≈ 전일 종가의 0.00195%다."""
+
+PRICE_DECIMALS = 4
+"""정련 중간 가격 양자화 자릿수 — `signal_price_bands.price_low/price_high`
+`DECIMAL(18,4)`와 같아, 평가한 가격이 DB 반올림 뒤에도 그대로 저장된다."""
 
 _GRID_RANGE_PCT_BY_MARKET: dict[str, float] = {
     "domestic": DOMESTIC_GRID_RANGE_PCT,
@@ -205,25 +221,33 @@ def _freeze_last_row_at_price(adjusted: pd.DataFrame, price: float) -> pd.DataFr
     return virtual
 
 
-def assemble_sweep_feature_matrix(
+@dataclass(frozen=True, slots=True, eq=False)
+class SweepContext:
+    """(종목, 시장) 1건의 밴드 스윕 평가 입력 — 수정 주가 이력과 동결(FROZEN)
+    피처 값을 한 번만 준비해 격자 평가와 정련 평가가 함께 쓴다(REQ-AIR-006)."""
+
+    grid: np.ndarray
+    prev_close: float
+    adjusted: pd.DataFrame
+    feature_columns: tuple[str, ...]
+    price_derived_columns: tuple[str, ...]
+    frozen_values: Mapping[str, object]
+
+
+def prepare_sweep_context(
     engine: Engine,
     calendar: TradingCalendar,
     stock_code: str,
     as_of_date: date,
     market: str,
     feature_columns: Sequence[str],
-) -> tuple[np.ndarray, pd.DataFrame, float] | SkipReason:
-    """그리드 전체에 대한 피처 행렬을 조립한다(design.md §5, AC-AIF-018).
+) -> SweepContext | SkipReason:
+    """밴드 스윕 평가 입력을 준비한다(design.md §5, AC-AIF-018).
 
-    PRICE_DERIVED 컬럼은 그리드 가격마다 `compute_technical_features()`를
-    재호출해 재계산하고(전체 이력을 다시 통과시켜야 롤링 윈도가 올바르게
-    갱신된다), FROZEN 컬럼(수급 피처)은 실제 마지막 행 값을 1회만 계산해
-    그리드 전체에 동일하게 채운다. 이력이 `LOOKBACK_TRADING_DAYS` 미만이거나
-    FROZEN 컬럼이 필요한데 수급 데이터가 없으면 `SkipReason.
-    FEATURE_INSUFFICIENT`를 반환한다(예외를 던지지 않는다, AC-AIF-011).
-
-    반환값은 `(grid, matrix, prev_close)` — `matrix`의 컬럼 순서는
-    `feature_columns` 그대로다(예측 시 `predict.py`의 컬럼 선택과 정합).
+    FROZEN 컬럼(수급 피처)은 실제 마지막 행 값을 1회만 계산해 둔다. 이력이
+    `LOOKBACK_TRADING_DAYS` 미만이거나 FROZEN 컬럼이 필요한데 수급 데이터가
+    없으면 `SkipReason.FEATURE_INSUFFICIENT`를 반환한다(예외를 던지지 않는다,
+    AC-AIF-011).
     """
     raw = fetch_daily_ohlcv(engine, stock_code, end_date=as_of_date)
     if len(raw) < LOOKBACK_TRADING_DAYS:
@@ -254,9 +278,26 @@ def assemble_sweep_feature_matrix(
             raise ValueError(f"밴드 스윕에 필요한 FROZEN 피처 컬럼이 누락되었다: {missing}")
         frozen_values = {col: frozen_row[col] for col in frozen_cols}
 
+    return SweepContext(
+        grid=grid,
+        prev_close=prev_close,
+        adjusted=adjusted,
+        feature_columns=tuple(feature_columns),
+        price_derived_columns=tuple(price_derived_cols),
+        frozen_values=frozen_values,
+    )
+
+
+def feature_matrix_at_prices(context: SweepContext, prices: np.ndarray) -> pd.DataFrame:
+    """가격마다 PRICE_DERIVED 컬럼을 `compute_technical_features()` 재호출로
+    재계산하고(전체 이력을 다시 통과시켜야 롤링 윈도가 올바르게 갱신된다),
+    FROZEN 컬럼은 동결 값으로 채운 피처 행렬을 만든다 — 격자 가격과 정련
+    가격이 같은 경로를 쓴다(REQ-AIR-006). 컬럼 순서는 `feature_columns`
+    그대로다(예측 시 `predict.py`의 컬럼 선택과 정합)."""
+    price_derived_cols = list(context.price_derived_columns)
     price_derived_rows: list[pd.Series] = []
-    for price in grid:
-        virtual = _freeze_last_row_at_price(adjusted, float(price))
+    for price in prices:
+        virtual = _freeze_last_row_at_price(context.adjusted, float(price))
         recomputed = compute_technical_features(virtual)
         last = recomputed.tail(1).reset_index(drop=True).iloc[0]
         missing = [c for c in price_derived_cols if c not in last.index]
@@ -265,10 +306,145 @@ def assemble_sweep_feature_matrix(
         price_derived_rows.append(last[price_derived_cols])
 
     matrix = pd.DataFrame(price_derived_rows).reset_index(drop=True)
-    for col, value in frozen_values.items():
+    for col, value in context.frozen_values.items():
         matrix[col] = value
-    matrix = matrix.loc[:, list(feature_columns)]
-    return grid, matrix, prev_close
+    return matrix.loc[:, list(context.feature_columns)]
+
+
+def assemble_sweep_feature_matrix(
+    engine: Engine,
+    calendar: TradingCalendar,
+    stock_code: str,
+    as_of_date: date,
+    market: str,
+    feature_columns: Sequence[str],
+) -> tuple[np.ndarray, pd.DataFrame, float] | SkipReason:
+    """그리드 전체에 대한 피처 행렬을 조립한다(design.md §5, AC-AIF-018).
+
+    반환값은 `(grid, matrix, prev_close)` — 스킵 조건은
+    `prepare_sweep_context()`, 행 조립 규칙은 `feature_matrix_at_prices()`와 같다.
+    """
+    context = prepare_sweep_context(
+        engine, calendar, stock_code, as_of_date, market, feature_columns
+    )
+    if isinstance(context, SkipReason):
+        return context
+    return context.grid, feature_matrix_at_prices(context, context.grid), context.prev_close
+
+
+def score_prices(serving_plan: ServingPlan, feature_matrix: pd.DataFrame) -> np.ndarray:
+    """피처 행렬 전체를 booster 1회 로드로 예측하고 행마다 score를 파생한다
+    (`compute_score_columns()` 위임 — 격자·정련 평가 공용, REQ-AIR-006)."""
+    predictions_by_algo = predict_point_models_batch(serving_plan, feature_matrix)
+    return np.array(
+        [
+            compute_score_columns(
+                serving_plan.active_strategy,
+                {algo: float(values[i]) for algo, values in predictions_by_algo.items()},
+            ).score
+            for i in range(len(feature_matrix))
+        ],
+        dtype=float,
+    )
+
+
+@dataclass(slots=True)
+class _Bracket:
+    """내부 경계 하나의 이분 탐색 구간 — `low`는 앞 밴드 등급이 유지되는 가격,
+    `high`는 앞 밴드 등급이 아닌 가격(REQ-AIR-003)."""
+
+    prior_class: str
+    low: float
+    high: float
+
+
+def _refine_internal_boundaries(
+    merged_by_set: Mapping[BoundarySet, list[PriceBand]],
+    boundaries_by_set: Mapping[BoundarySet, Mapping[str, float]],
+    evaluate: Callable[[np.ndarray], np.ndarray],
+) -> dict[BoundarySet, list[float]]:
+    # @MX:NOTE: [AUTO] 판정 조건은 "앞 밴드 등급이 유지되는가"(plan.md PD-5) — 뒤 밴드 첫
+    # 격자점은 병합된 조각일 수 있어 "뒤 밴드 등급인가"로 판정하면 안 된다. 모든 세트·경계를
+    # 반복 단위로 묶어 반복당 평가 1회(같은 가격은 1번만)로 모델 로드를 제한한다(PD-3).
+    brackets = {
+        boundary_set: [
+            _Bracket(prior_class=prior.signal_class, low=prior.price_high, high=nxt.price_low)
+            for prior, nxt in pairwise(bands)
+        ]
+        for boundary_set, bands in merged_by_set.items()
+    }
+    searching = [
+        (boundary_set, bracket) for boundary_set, items in brackets.items() for bracket in items
+    ]
+    for _ in range(REFINE_MAX_ITERATIONS):
+        pending: list[tuple[BoundarySet, _Bracket, float]] = []
+        for boundary_set, bracket in searching:
+            mid = round((bracket.low + bracket.high) / 2, PRICE_DECIMALS)
+            # 양자화한 중간 가격이 구간 끝과 같으면 더 좁힐 수 없다 — 이 경계의 탐색 종료.
+            if mid not in (bracket.low, bracket.high):
+                pending.append((boundary_set, bracket, mid))
+        if not pending:
+            break
+        searching = [(boundary_set, bracket) for boundary_set, bracket, _ in pending]
+
+        prices = np.unique(np.array([mid for _, _, mid in pending], dtype=float))
+        scores = np.asarray(evaluate(prices), dtype=float)
+        grade_at = {
+            boundary_set: dict(
+                zip(prices.tolist(), classify_grades(scores, boundaries).tolist(), strict=True)
+            )
+            for boundary_set, boundaries in boundaries_by_set.items()
+        }
+        for boundary_set, bracket, mid in pending:
+            if grade_at[boundary_set][mid] == bracket.prior_class:
+                bracket.low = mid
+            else:
+                bracket.high = mid
+    return {
+        boundary_set: [bracket.high for bracket in items]
+        for boundary_set, items in brackets.items()
+    }
+
+
+# @MX:ANCHOR: [AUTO] 밴드 파티션 산출 계약 — 격자 등급 → run-length → 1% 조각 병합 → 내부 경계
+# 정련(PD-1) → 인접 밴드가 경계를 공유하는 연속 파티션(REQ-AIR-001).
+# @MX:REASON: notifier `BandPartition.lookup`의 반개구간 해석(REQ-AIR-002)과 T4 재생 검증이
+# 이 출력 형태에 의존한다 — 밴드 개수·등급 순서를 바꾸는 변경은 AC-AIR-005 회귀다.
+def sweep_price_partitions(
+    grid: np.ndarray,
+    boundaries_by_set: Mapping[BoundarySet, Mapping[str, float]],
+    *,
+    prev_close: float,
+    evaluate: Callable[[np.ndarray], np.ndarray],
+) -> dict[BoundarySet, list[PriceBand]]:
+    """경계 세트별 연속 가격 파티션을 산출한다(REQ-AIR-001~005·008).
+
+    `evaluate`는 가격 배열을 받아 같은 길이의 score 배열을 돌려주는 함수다 —
+    격자 평가에 한 번, 정련 반복마다 한 번 호출된다(최대 1 +
+    `REFINE_MAX_ITERATIONS`회). 각 내부 경계는 `(앞 밴드 마지막 격자점, 뒤 밴드
+    첫 격자점]` 안에서 이분 탐색하며, 저장 경계는 최종 구간의 위 끝(앞 밴드
+    등급이 아니라고 평가된 가격)이다. 밴드 개수와 등급 순서는 병합 결과
+    그대로다. 마지막 밴드를 제외한 밴드는 `[price_low, price_high)`, 마지막
+    밴드는 `[price_low, price_high]`로 읽는다.
+    """
+    grid = np.asarray(grid, dtype=float)
+    grid_scores = np.asarray(evaluate(grid), dtype=float)
+    merged_by_set = {
+        boundary_set: merge_adjacent_bands(
+            grid, classify_grades(grid_scores, boundaries), prev_close=prev_close
+        )
+        for boundary_set, boundaries in boundaries_by_set.items()
+    }
+    refined = _refine_internal_boundaries(merged_by_set, boundaries_by_set, evaluate)
+
+    partitions: dict[BoundarySet, list[PriceBand]] = {}
+    for boundary_set, bands in merged_by_set.items():
+        edges = [bands[0].price_low, *refined[boundary_set], bands[-1].price_high]
+        partitions[boundary_set] = [
+            PriceBand(price_low=low, price_high=high, signal_class=band.signal_class)
+            for band, (low, high) in zip(bands, pairwise(edges), strict=True)
+        ]
+    return partitions
 
 
 def _union_feature_columns(serving_plan: ServingPlan) -> list[str]:
@@ -301,40 +477,36 @@ def sweep_and_write_price_bands(
     (design.md §5, REQ-AIF-110/111/060).
 
     피처 조립 실패(이력 부족)는 `SkipReason.FEATURE_INSUFFICIENT`로,
-    모델 로드 직후 감지된 학습 잡 레이스는 `SkipReason.MANIFEST_RACE`로
-    라우팅한다(design.md §7) — 두 경우 모두 `signal_price_bands`에 어떤
-    행도 기록하지 않는다. 성공 시 boundary_set별 INSERT 결과를 담은
-    매핑(`{"PROMOTE": ..., "DEMOTE": ...}`)을 반환한다.
+    격자·정련 평가를 모두 마친 뒤 감지된 학습 잡 레이스는
+    `SkipReason.MANIFEST_RACE`로 라우팅한다(design.md §7, REQ-AIR-007) — 두
+    경우 모두 `signal_price_bands`에 어떤 행도 기록하지 않는다. 성공 시
+    boundary_set별 INSERT 결과를 담은 매핑(`{"PROMOTE": ..., "DEMOTE": ...}`)을
+    반환한다.
     """
     feature_columns = _union_feature_columns(serving_plan)
-    result = assemble_sweep_feature_matrix(
+    context = prepare_sweep_context(
         engine, calendar, stock_code, trade_date, market, feature_columns
     )
-    if isinstance(result, SkipReason):
-        return result
-    grid, matrix, prev_close = result
+    if isinstance(context, SkipReason):
+        return context
 
-    predictions_by_algo = predict_point_models_batch(serving_plan, matrix)
+    def evaluate(prices: np.ndarray) -> np.ndarray:
+        return score_prices(serving_plan, feature_matrix_at_prices(context, prices))
 
-    # design.md §7: 모델을 실제로 로드(=예측)한 직후 매니페스트를 재확인한다.
+    boundaries_by_set = {
+        boundary_set: boundaries_artifact.boundaries_for(market, horizon, boundary_set)
+        for boundary_set in (BoundarySet.PROMOTE, BoundarySet.DEMOTE)
+    }
+    partitions = sweep_price_partitions(
+        context.grid, boundaries_by_set, prev_close=context.prev_close, evaluate=evaluate
+    )
+
+    # design.md §7 / REQ-AIR-007: 마지막 모델 로드(정련 평가 포함) 뒤에 매니페스트를 재확인한다.
     if detect_manifest_race(models_root, serving_plan):
         return SkipReason.MANIFEST_RACE
 
-    scores = np.array(
-        [
-            compute_score_columns(
-                serving_plan.active_strategy,
-                {algo: float(values[i]) for algo, values in predictions_by_algo.items()},
-            ).score
-            for i in range(len(grid))
-        ]
-    )
-
     outcomes: dict[str, str] = {}
-    for boundary_set in (BoundarySet.PROMOTE, BoundarySet.DEMOTE):
-        shifted = boundaries_artifact.boundaries_for(market, horizon, boundary_set)
-        grades = classify_grades(scores, shifted)
-        bands = merge_adjacent_bands(grid, grades, prev_close=prev_close)
+    for boundary_set, bands in partitions.items():
         rows = [
             PriceBandRow(
                 stock_id=stock_id,
