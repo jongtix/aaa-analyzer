@@ -12,64 +12,6 @@
 # 릴리스 미발생으로 수정이 실제 배포까지 이어지지 못함). Conventional Commits/semantic-release
 # 업계 관행도 동일 — 취약점 제거·완화는 `fix`.
 
-# CVE-2026-53615 | util-linux 계열 9패키지(bsdutils/libblkid1/liblastlog2-2/libmount1/libsmartcols1/libuuid1/login/mount/util-linux) HIGH
-# 사유: 상류-지연(upstream-lag) — Debian trixie에 수정판 2.41.5-0+deb13u1 게시됨,
-#       python:3.14-slim base(2026-08-05 빌드)가 아직 이를 반영하지 않은 상태. 레포 내 교정 수단 없음(REQ-CVE-016).
-# 승인: 2026-08-19 (사용자) | 만료: 2026-09-18 (승인일+30일, REQ-CVE-022 기본값)
-CVE-2026-53615 exp:2026-09-18
-
-# CVE-2026-53612, CVE-2026-53613, CVE-2026-53614 | util-linux 계열 9패키지(bsdutils/libblkid1/liblastlog2-2/libmount1/libsmartcols1/libuuid1/login/mount/util-linux) HIGH
-# 사유: 상류-지연(upstream-lag) — CVE-2026-53615와 동일 패키지군, Debian trixie에 수정판
-#       2.41.5-0+deb13u1 게시됨, python:3.14-slim base가 아직 이를 반영하지 않은 상태.
-#       레포 내 교정 수단 없음(REQ-CVE-016).
-# 승인: 2026-08-25 (사용자) | 만료: 2026-09-24 (승인일+30일, REQ-CVE-022 기본값)
-CVE-2026-53612 exp:2026-09-24
-CVE-2026-53613 exp:2026-09-24
-CVE-2026-53614 exp:2026-09-24
-
-# CVE-2026-14456 | libssl3t64/openssl HIGH
-# 사유: 상류-지연(upstream-lag) — Debian trixie에 수정판 3.5.7-1~deb13u2 게시 예정,
-#       python:3.14-slim base가 아직 이를 반영하지 않은 상태. 레포 내 교정 수단 없음(REQ-CVE-016).
-# 승인: 2026-08-29 (사용자) | 만료: 2026-09-28 (승인일+30일, REQ-CVE-022 기본값)
-CVE-2026-14456 exp:2026-09-28
-
-# CVE-2026-13221, CVE-2026-42496, CVE-2026-8376, CVE-2026-42497, CVE-2026-48962,
-# CVE-2026-57432, CVE-2026-57433 | perl-base/perl-Archive-Tar/perl-IO-Compress/Storable
-# CRITICAL(13221) + HIGH(나머지)
-# 사유: 상류-지연(upstream-lag) — Debian trixie에 수정판 5.40.1-6+deb13u1 게시됨,
-#       python:3.14-slim base(pin된 digest, Docker Hub 최신 digest와 일치·2026-09-01 빌드)가
-#       아직 이를 반영하지 않은 상태. Dependabot docker ecosystem은 태그의 최신 digest가
-#       이미 pin되어 있어 교체 대상이 없어 PR을 낼 수 없음. 레포 내 교정 수단 없음(REQ-CVE-016).
-# 승인: 2026-09-17 (사용자) | 만료: 2026-10-17 (승인일+30일, REQ-CVE-022 기본값)
-CVE-2026-13221 exp:2026-10-17
-CVE-2026-42496 exp:2026-10-17
-CVE-2026-8376 exp:2026-10-17
-CVE-2026-42497 exp:2026-10-17
-CVE-2026-48962 exp:2026-10-17
-CVE-2026-57432 exp:2026-10-17
-CVE-2026-57433 exp:2026-10-17
-
-# CVE-2026-41992 | gzip HIGH
-# 사유: 상류-지연(upstream-lag) — Debian trixie에 수정판 1.13-1+deb13u1 게시됨,
-#       python:3.14-slim base가 아직 이를 반영하지 않은 상태. 레포 내 교정 수단 없음(REQ-CVE-016).
-# 승인: 2026-09-17 (사용자) | 만료: 2026-10-17 (승인일+30일, REQ-CVE-022 기본값)
-CVE-2026-41992 exp:2026-10-17
-
-# CVE-2026-86145, CVE-2026-89157, CVE-2026-89161 | libpcre2-8-0
-# 사유: 상류-지연(upstream-lag) — Debian trixie에 수정판 10.46-1~deb13u2 게시됨,
-#       python:3.14-slim base가 아직 이를 반영하지 않은 상태. 레포 내 교정 수단 없음(REQ-CVE-016).
-# 승인: 2026-09-17 (사용자) | 만료: 2026-10-17 (승인일+30일, REQ-CVE-022 기본값)
-CVE-2026-86145 exp:2026-10-17
-CVE-2026-89157 exp:2026-10-17
-CVE-2026-89161 exp:2026-10-17
-
-# CVE-2026-11822, CVE-2026-11824 | libsqlite3-0
-# 사유: 상류-지연(upstream-lag) — Debian trixie에 수정판 3.46.1-7+deb13u2 게시됨,
-#       python:3.14-slim base가 아직 이를 반영하지 않은 상태. 레포 내 교정 수단 없음(REQ-CVE-016).
-# 승인: 2026-09-17 (사용자) | 만료: 2026-10-17 (승인일+30일, REQ-CVE-022 기본값)
-CVE-2026-11822 exp:2026-10-17
-CVE-2026-11824 exp:2026-10-17
-
 # CVE-2026-103111 | libpcre2-8-0 HIGH
 # 사유: 상류-지연(upstream-lag) — Debian trixie에 수정판 10.46-1~deb13u3 게시됨,
 #       python:3.14-slim base가 아직 이를 반영하지 않은 상태. 레포 내 교정 수단 없음(REQ-CVE-016).
@@ -82,3 +24,8 @@ CVE-2026-103111 exp:2026-11-07
 # 승인: 2026-10-08 (사용자) | 만료: 2026-11-07 (승인일+30일, REQ-CVE-022 기본값)
 CVE-2026-75804 exp:2026-11-07
 CVE-2026-84782 exp:2026-11-07
+
+# 2026-10-13: 만료·만료 임박 예외 18건 제거(CVE-2026-53615, 53612~53614, 14456, 13221, 42496, 8376,
+# 42497, 48962, 57432, 57433, 41992, 86145, 89157, 89161, 11822, 11824). main에 pin된
+# python:3.14-slim digest(a2b82f3) 스캔에서 전부 해소돼 예외가 불필요해졌다.
+# 재발하면 그때 새 승인일·만료일로 다시 등록한다.
