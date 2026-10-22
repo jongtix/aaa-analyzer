@@ -74,6 +74,41 @@ jobs:
       - name: Check commit gitmoji vs semantic-release gate
         run: python3 scripts/check_commit_gitmoji.py origin/main..HEAD
 
+  # PR 시점 의존성 취약점 스캔(SPEC-INFRA-PRSCAN-001): docker.yml의 Trivy 게이트와
+  # 같은 액션 SHA·임계값(CRITICAL,HIGH, ignore-unfixed)으로 uv.lock의 라이브러리
+  # 취약점을 PR 단계에서 차단한다. .trivyignore는 작업 디렉터리에서 자동 소비된다.
+  dependency-scan:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # 입력 확인 스텝 — 이름은 "Assert"로 시작한다.
+      # trivy fs는 지원 파일이 없거나 패키지가 하나도 없어도 종료 코드 0으로 끝나므로 빈 입력을 직접 막는다.
+      # test -s는 uv.lock이 없거나 빈 경우를, grep은 주석뿐인 uv.lock을 잡는다.
+      - name: Assert uv.lock is non-empty
+        run: |
+          set -euo pipefail
+          test -s uv.lock
+          grep -qE '^\[\[package\]\]' uv.lock
+
+      - name: Trivy dependency scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          vuln-type: library
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+
   release:
     needs: test
     if: github.event_name == 'push'
