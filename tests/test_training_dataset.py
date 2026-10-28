@@ -10,6 +10,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 import pytest
+from _pandas_helpers import col
 
 from analyzer.data.models import TradingCalendar
 from analyzer.training.dataset import assemble_dataset
@@ -143,7 +144,7 @@ class TestAssembleDataset:
             market="overseas",
         )
 
-        assert result["trade_date"].min() >= date(2007, 8, 20)
+        assert col(result, "trade_date").min() >= date(2007, 8, 20)
 
 
 class TestAssembleDatasetEmptyUniverse:

@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import xgboost as xgb
+from _pandas_helpers import col
 
 from analyzer.data.models import TradingCalendar
 from analyzer.inference import sweep as sweep_module
@@ -280,7 +281,7 @@ class TestAssembleSweepFeatureMatrix:
 
         assert not isinstance(result, SkipReason)
         _grid, matrix, _prev_close = result
-        assert matrix["KMID"].nunique() > 1
+        assert col(matrix, "KMID").nunique() > 1
 
     def test_frozen_column_is_constant_across_grid(self):
         dates = _weekdays(date(2026, 1, 1), date(2026, 4, 1))
@@ -306,7 +307,7 @@ class TestAssembleSweepFeatureMatrix:
 
         assert not isinstance(result, SkipReason)
         _grid, matrix, _prev_close = result
-        assert matrix["foreign_net_ratio"].nunique() == 1
+        assert col(matrix, "foreign_net_ratio").nunique() == 1
 
     def test_insufficient_history_returns_feature_insufficient(self):
         dates = _weekdays(date(2026, 3, 1), date(2026, 3, 20))
