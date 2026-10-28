@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
+from _pandas_helpers import col
 
 from analyzer.training import campaign as campaign_module
 from analyzer.training.backtest import BacktestMetrics
@@ -285,8 +286,8 @@ class TestResolveTuningSplitUsesOnlyInitialHistory:
 
         assert not train_df.empty
         assert not val_df.empty
-        assert train_df["trade_date"].max() < eval_span_start_date
-        assert val_df["trade_date"].max() < eval_span_start_date
+        assert col(train_df, "trade_date").max() < eval_span_start_date
+        assert col(val_df, "trade_date").max() < eval_span_start_date
 
     def test_purged_walk_forward_split_is_actually_invoked(self):
         panel = _make_synthetic_panel(n_dates=400)

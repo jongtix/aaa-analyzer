@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 import lightgbm as lgb
 import pandas as pd
 import pytest
+from _pandas_helpers import col
 
 from analyzer.data.models import TradingCalendar
 from analyzer.training import train as train_module
@@ -911,7 +912,7 @@ class TestFetchMarketDataDataAsOfBoundary:
             )
 
         assembled = ohlcv_by_stock["A1"]
-        assert (assembled["trade_date"] > date(2026, 8, 10)).sum() == 0
+        assert (col(assembled, "trade_date") > date(2026, 8, 10)).sum() == 0
         assert len(assembled) == 10
 
 

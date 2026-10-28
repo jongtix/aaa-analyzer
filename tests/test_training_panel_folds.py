@@ -9,6 +9,7 @@ example을 구현한다.
 
 import pandas as pd
 import pytest
+from _pandas_helpers import col
 
 from analyzer.labels.config import PURGE_GAP_TRADING_DAYS
 from analyzer.training.panel_folds import (
@@ -195,10 +196,10 @@ class TestDateBoundaryPanelFiltering:
         # 종목 C(300일까지만 존재)는 train_end가 300일 미만이면 학습 구간에 등장해야 한다.
         assert "C" in train_df["stock_code"].unique()
         # 모든 부분집합의 행이 실제로 날짜 경계를 만족해야 한다(값 비교 확인).
-        assert (train_df["trade_date"] < date_bounds.train_end).all()
-        assert (val_df["trade_date"] >= date_bounds.val_start).all()
+        assert (col(train_df, "trade_date") < date_bounds.train_end).all()
+        assert (col(val_df, "trade_date") >= date_bounds.val_start).all()
         if date_bounds.val_end is not None:
-            assert (val_df["trade_date"] < date_bounds.val_end).all()
+            assert (col(val_df, "trade_date") < date_bounds.val_end).all()
 
     def test_train_and_val_subsets_do_not_overlap_per_stock(self):
         panel = _make_synthetic_panel()
@@ -226,7 +227,7 @@ class TestDateBoundaryPanelFiltering:
         date_bounds = map_index_bounds_to_dates(index_bounds, axis)
         train_df, _ = slice_panel_by_date_bounds(panel, date_bounds)
 
-        last_train_date = train_df["trade_date"].max()
+        last_train_date = col(train_df, "trade_date").max()
         purge_window = axis[(axis > last_train_date) & (axis < date_bounds.val_start)]
 
         assert len(purge_window) == gap
@@ -253,7 +254,7 @@ class TestDateBoundaryPanelFiltering:
         assert date_bounds.val_end is None
 
         _, val_df = slice_panel_by_date_bounds(panel, date_bounds)
-        assert (val_df["trade_date"] >= date_bounds.val_start).all()
+        assert (col(val_df, "trade_date") >= date_bounds.val_start).all()
 
 
 class TestObjectDtypeDateColumnRegression:
