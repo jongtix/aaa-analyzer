@@ -12,18 +12,12 @@
 # 릴리스 미발생으로 수정이 실제 배포까지 이어지지 못함). Conventional Commits/semantic-release
 # 업계 관행도 동일 — 취약점 제거·완화는 `fix`.
 
-# CVE-2026-103111 | libpcre2-8-0 HIGH
-# 사유: 상류-지연(upstream-lag) — Debian trixie에 수정판 10.46-1~deb13u3 게시됨,
-#       python:3.14-slim base가 아직 이를 반영하지 않은 상태. 레포 내 교정 수단 없음(REQ-CVE-016).
-# 승인: 2026-10-08 (사용자) | 만료: 2026-11-07 (승인일+30일, REQ-CVE-022 기본값)
-CVE-2026-103111 exp:2026-11-07
-
-# CVE-2026-75804, CVE-2026-84782 | libssl3t64/openssl/openssl-provider-legacy HIGH
-# 사유: 상류-지연(upstream-lag) — Debian trixie에 수정판 3.5.7-1~deb13u3 게시됨,
-#       python:3.14-slim base가 아직 이를 반영하지 않은 상태. 레포 내 교정 수단 없음(REQ-CVE-016).
-# 승인: 2026-10-08 (사용자) | 만료: 2026-11-07 (승인일+30일, REQ-CVE-022 기본값)
-CVE-2026-75804 exp:2026-11-07
-CVE-2026-84782 exp:2026-11-07
+# 2026-11-03: 만료 임박(2026-11-07) 예외 3건 제거(CVE-2026-103111 libpcre2-8-0,
+# CVE-2026-75804·CVE-2026-84782 libssl3t64/openssl/openssl-provider-legacy). main에 pin된
+# python:3.14-slim digest(cd89c30, Dependabot PR #102)의 dpkg 실측 결과 수정판
+# libpcre2-8-0 10.46-1~deb13u3 / openssl 계열 3.5.7-1~deb13u3이 이미 반영돼 예외가
+# 불필요해졌다. trivy 스캔이 아닌 패키지 버전 실측 근거이므로 최종 판정은 Docker 게이트가 한다.
+# 재발하면 그때 새 승인일·만료일로 다시 등록한다.
 
 # 2026-10-13: 만료·만료 임박 예외 18건 제거(CVE-2026-53615, 53612~53614, 14456, 13221, 42496, 8376,
 # 42497, 48962, 57432, 57433, 41992, 86145, 89157, 89161, 11822, 11824). main에 pin된
