@@ -16,7 +16,8 @@ confidence)가 이미 산출한 결과를 `TradingSignalRow`로 조립해 전달
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -219,6 +220,84 @@ def insert_signal_price_bands(engine: Engine, rows: Sequence[PriceBandRow]) -> s
                         "created_at": inserted_at,
                     },
                 )
+    except IntegrityError:
+        return InsertOutcome.SKIPPED_DUPLICATE
+    return InsertOutcome.INSERTED
+
+
+_SELECT_PRICE_CURVE_EXISTS_SQL = text(
+    "SELECT 1 FROM signal_price_curves "
+    "WHERE stock_id = :stock_id AND trade_date = :trade_date AND horizon = :horizon LIMIT 1"
+)
+"""SPEC-SIGNAL-PRICECURVE-001 REQ-002: (stock_id, trade_date, horizon) 3-튜플
+단위 사전 존재 확인 — `boundary_set` 차원이 없다(plan.md §B-2, M1 DDL에
+그 컬럼이 없음)."""
+
+_INSERT_PRICE_CURVE_SQL = text(
+    "INSERT INTO signal_price_curves "
+    "(stock_id, trade_date, horizon, prev_close, grid_step_pct, curve, model_version, created_at) "
+    "VALUES (:stock_id, :trade_date, :horizon, :prev_close, :grid_step_pct, :curve, "
+    ":model_version, :created_at)"
+)
+"""V50(SPEC-SIGNAL-PRICECURVE-001 M1) 컬럼 계약. `signal_price_bands`와
+마찬가지로 `updated_at` 컬럼이 없다(INSERT-ONLY). `curve`는 네이티브
+`JSON` 컬럼 — 바인딩 시 `json.dumps()`로 직렬화한 텍스트를 전달한다
+(이 컬럼 타입을 쓰는 다른 선례가 레포에 없어, SQLAlchemy raw `text()` +
+JSON 텍스트 바인딩이라는 표준 패턴을 그대로 적용한다)."""
+
+
+@dataclass(frozen=True, slots=True)
+class PriceCurveRow:
+    """`signal_price_curves` 1행 — 밴드 스윕(`inference/sweep.py`,
+    `sweep_price_partitions_with_curve()`)이 산출한 그리드별 (price, score)
+    전체를 담는다(REQ-PRICECURVE-001/002/003). `signal_price_bands`와 달리
+    `boundary_set`/`band_seq`가 없다 — PROMOTE/DEMOTE가 공유하는 평가 1회의
+    원값이며 (stock_id, trade_date, horizon)당 1행이다."""
+
+    stock_id: int
+    trade_date: date
+    horizon: int
+    prev_close: float
+    grid_step_pct: float
+    curve: Sequence[Mapping[str, float]]
+    """`[{"price": ..., "score": ...}, ...]` — 그리드 오름차순(REQ-PRICECURVE-003).
+    억제 전 원값이며 `regime_suppressed` 분기가 없다(plan.md M1 DDL 결정)."""
+    model_version: str
+
+
+def insert_signal_price_curve(engine: Engine, row: PriceCurveRow) -> str:
+    """`signal_price_curves`에 (stock_id, trade_date, horizon) 단위로 사전
+    SELECT 후 INSERT한다(REQ-PRICECURVE-002, `insert_signal_price_bands()`와
+    같은 멱등 패턴). `signal_price_bands`와 달리 한 번에 쓰는 행이 정확히
+    1개라 band_seq 반복이 없다 — 호출당 1행.
+    """
+    inserted_at = datetime.now(_KST)
+    try:
+        with engine.begin() as conn:
+            exists = conn.execute(
+                _SELECT_PRICE_CURVE_EXISTS_SQL,
+                {
+                    "stock_id": row.stock_id,
+                    "trade_date": row.trade_date,
+                    "horizon": format_horizon_label(row.horizon),
+                },
+            ).first()
+            if exists is not None:
+                return InsertOutcome.SKIPPED_DUPLICATE
+
+            conn.execute(
+                _INSERT_PRICE_CURVE_SQL,
+                {
+                    "stock_id": row.stock_id,
+                    "trade_date": row.trade_date,
+                    "horizon": format_horizon_label(row.horizon),
+                    "prev_close": row.prev_close,
+                    "grid_step_pct": row.grid_step_pct,
+                    "curve": json.dumps(list(row.curve)),
+                    "model_version": row.model_version,
+                    "created_at": inserted_at,
+                },
+            )
     except IntegrityError:
         return InsertOutcome.SKIPPED_DUPLICATE
     return InsertOutcome.INSERTED
