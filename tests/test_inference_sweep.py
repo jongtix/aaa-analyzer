@@ -487,6 +487,127 @@ class TestSweepAndWritePriceBands:
                 assert prev.price_high == nxt.price_low
             assert all(row.price_low < row.price_high for row in rows)
 
+    def test_successful_sweep_also_writes_one_curve_row(self, tmp_path: Path):
+        """SPEC-SIGNAL-PRICECURVE-001 M2(REQ-PRICECURVE-002/004): 밴드 INSERT와
+        같은 성공 경로에서 커브 1행이 (stock_id, trade_date, horizon)당 정확히
+        1회 기록된다 — boundary_set 차원이 없다."""
+        dates = _weekdays(date(2026, 1, 1), date(2026, 4, 1))
+        as_of_date = dates[-1]
+        calendar = _calendar(date(2025, 12, 1), date(2026, 4, 10))
+        engine = MagicMock()
+        feature_columns = ["ROC_60"]
+        model_path = _train_xgboost(tmp_path, "xgb_sweep_curve", feature_columns, seed=35)
+        plan = ServingPlan(
+            market="domestic",
+            horizon=20,
+            active_strategy="xgboost",
+            algorithms=("xgboost",),
+            manifests={},
+            model_paths={"xgboost": model_path},
+        )
+        boundaries_artifact = MagicMock()
+        boundaries_artifact.boundaries_for.return_value = {
+            "STRONG_SELL_SELL": -0.10,
+            "SELL_HOLD": -0.03,
+            "HOLD_BUY": 0.03,
+            "BUY_STRONG_BUY": 0.10,
+        }
+
+        with (
+            patch(
+                "analyzer.inference.sweep.fetch_daily_ohlcv",
+                return_value=_ohlcv("A1", dates),
+            ),
+            patch("analyzer.inference.sweep.fetch_corporate_events", return_value=_empty_events()),
+            patch("analyzer.inference.sweep.fetch_investor_trend", return_value=_empty_trend()),
+            patch("analyzer.inference.sweep.detect_manifest_race", return_value=False),
+            patch("analyzer.inference.sweep.insert_signal_price_bands", return_value="inserted"),
+            patch(
+                "analyzer.inference.sweep.insert_signal_price_curve",
+                return_value="inserted",
+            ) as mock_insert_curve,
+        ):
+            result = sweep_and_write_price_bands(
+                engine=engine,
+                calendar=calendar,
+                boundaries_artifact=boundaries_artifact,
+                serving_plan=plan,
+                models_root=tmp_path,
+                stock_id=1,
+                stock_code="A1",
+                market="domestic",
+                horizon=20,
+                trade_date=as_of_date,
+                model_version="domestic_20_xgboost_2026-08-19",
+            )
+
+        assert result == {"PROMOTE": "inserted", "DEMOTE": "inserted"}
+        assert mock_insert_curve.call_count == 1
+        curve_row = mock_insert_curve.call_args.args[1]
+        assert curve_row.stock_id == 1
+        assert curve_row.trade_date == as_of_date
+        assert curve_row.horizon == 20
+        assert curve_row.grid_step_pct == GRID_STEP_PCT
+        assert curve_row.model_version == "domestic_20_xgboost_2026-08-19"
+        grid = build_price_grid(50_000.0, "domestic")
+        assert [point["price"] for point in curve_row.curve] == grid.tolist()
+        assert all(isinstance(point["score"], float) for point in curve_row.curve)
+
+    def test_curve_insert_failure_does_not_affect_band_outcome(self, tmp_path: Path):
+        """plan-audit D5: 커브 INSERT가 실패해도 이미 성공한 밴드 INSERT
+        결과(outcomes)는 그대로 반환되고 예외가 전파되지 않는다."""
+        dates = _weekdays(date(2026, 1, 1), date(2026, 4, 1))
+        as_of_date = dates[-1]
+        calendar = _calendar(date(2025, 12, 1), date(2026, 4, 10))
+        engine = MagicMock()
+        feature_columns = ["ROC_60"]
+        model_path = _train_xgboost(tmp_path, "xgb_sweep_curve_fail", feature_columns, seed=36)
+        plan = ServingPlan(
+            market="domestic",
+            horizon=20,
+            active_strategy="xgboost",
+            algorithms=("xgboost",),
+            manifests={},
+            model_paths={"xgboost": model_path},
+        )
+        boundaries_artifact = MagicMock()
+        boundaries_artifact.boundaries_for.return_value = {
+            "STRONG_SELL_SELL": -0.10,
+            "SELL_HOLD": -0.03,
+            "HOLD_BUY": 0.03,
+            "BUY_STRONG_BUY": 0.10,
+        }
+
+        with (
+            patch(
+                "analyzer.inference.sweep.fetch_daily_ohlcv",
+                return_value=_ohlcv("A1", dates),
+            ),
+            patch("analyzer.inference.sweep.fetch_corporate_events", return_value=_empty_events()),
+            patch("analyzer.inference.sweep.fetch_investor_trend", return_value=_empty_trend()),
+            patch("analyzer.inference.sweep.detect_manifest_race", return_value=False),
+            patch("analyzer.inference.sweep.insert_signal_price_bands", return_value="inserted"),
+            patch(
+                "analyzer.inference.sweep.insert_signal_price_curve",
+                side_effect=RuntimeError("db unavailable"),
+            ),
+        ):
+            result = sweep_and_write_price_bands(
+                engine=engine,
+                calendar=calendar,
+                boundaries_artifact=boundaries_artifact,
+                serving_plan=plan,
+                models_root=tmp_path,
+                stock_id=1,
+                stock_code="A1",
+                market="domestic",
+                horizon=20,
+                trade_date=as_of_date,
+                model_version="domestic_20_xgboost_2026-08-19",
+            )
+
+        assert result == {"PROMOTE": "inserted", "DEMOTE": "inserted"}
+
     def _roc_scored_setup(
         self, tmp_path: Path
     ) -> tuple[list[date], TradingCalendar, ServingPlan, np.ndarray, pd.DataFrame]:
@@ -638,6 +759,81 @@ class TestSweepAndWritePriceBands:
             )
 
         assert result is SkipReason.FEATURE_INSUFFICIENT
+
+
+class TestSweepPricePartitionsWithCurve:
+    """SPEC-SIGNAL-PRICECURVE-001 M2(AC-PRICECURVE-001/005): `grid_scores`가
+    폐기되지 않고 반환되며, 그리드 오프셋 0(전일 종가와 정확히 일치하는
+    격자점)의 score가 같은 (동결되지 않은) 피처 행에 대해
+    `compute_score_columns()`가 산출하는 score와 부동소수 허용오차 내에서
+    일치한다 — `trading_signals.score`가 거치는 것과 같은 계산 경로다."""
+
+    def test_offset_zero_curve_score_matches_compute_score_columns(self, tmp_path: Path):
+        dates = _weekdays(date(2026, 1, 1), date(2026, 4, 1))
+        calendar = _calendar(date(2025, 12, 1), date(2026, 4, 10))
+        model_path = _train_xgboost(tmp_path, "xgb_curve", ["ROC_60"], seed=34)
+        plan = ServingPlan(
+            market="domestic",
+            horizon=60,
+            active_strategy="xgboost",
+            algorithms=("xgboost",),
+            manifests={},
+            model_paths={"xgboost": model_path},
+        )
+
+        with (
+            patch(
+                "analyzer.inference.sweep.fetch_daily_ohlcv",
+                return_value=_ohlcv("A1", dates),
+            ),
+            patch("analyzer.inference.sweep.fetch_corporate_events", return_value=_empty_events()),
+        ):
+            context = sweep_module.prepare_sweep_context(
+                MagicMock(), calendar, "A1", dates[-1], "domestic", ["ROC_60"]
+            )
+        assert not isinstance(context, SkipReason)
+
+        def evaluate(prices: np.ndarray) -> np.ndarray:
+            return sweep_module.score_prices(
+                plan, sweep_module.feature_matrix_at_prices(context, prices)
+            )
+
+        # 경계는 전부 바깥쪽으로 밀어 둔다 — 이 테스트는 등급 분류가 아니라
+        # grid_scores 자체의 오프셋 0 값만 검증한다.
+        wide_boundaries = {
+            "STRONG_SELL_SELL": -1e9,
+            "SELL_HOLD": -1e8,
+            "HOLD_BUY": 1e8,
+            "BUY_STRONG_BUY": 1e9,
+        }
+        boundaries_by_set = {
+            BoundarySet.PROMOTE: wide_boundaries,
+            BoundarySet.DEMOTE: wide_boundaries,
+        }
+
+        _partitions, grid_scores = sweep_module.sweep_price_partitions_with_curve(
+            context.grid, boundaries_by_set, prev_close=context.prev_close, evaluate=evaluate
+        )
+
+        # AC-PRICECURVE-001: evaluate() 호출 횟수가 기존과 동일해야 하므로
+        # (그리드 1회 + 정련 반복), grid_scores는 evaluate(grid)를 다시
+        # 호출하지 않고도 얻어져야 한다 — 길이만 먼저 확인한다.
+        assert len(grid_scores) == len(context.grid)
+
+        center_index = len(context.grid) // 2
+        assert context.grid[center_index] == pytest.approx(context.prev_close)
+
+        # 오프셋 0 피처 행 — `_freeze_last_row_at_price(adjusted, prev_close)`는
+        # 마지막 행 close_price가 이미 prev_close이므로 실질적으로 변형이
+        # 없는 "기준" 피처 행이다(REQ-005).
+        base_matrix = sweep_module.feature_matrix_at_prices(context, np.array([context.prev_close]))
+        predictions = sweep_module.predict_point_models_batch(plan, base_matrix)
+        expected = sweep_module.compute_score_columns(
+            plan.active_strategy,
+            {algo: float(values[0]) for algo, values in predictions.items()},
+        ).score
+
+        assert grid_scores[center_index] == pytest.approx(expected, abs=1e-6)
 
 
 class _RecordingEvaluator:

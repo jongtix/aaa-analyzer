@@ -6,6 +6,7 @@
 이 SPEC 범위 밖 후속 작업이다.
 """
 
+import json
 from datetime import date
 from unittest.mock import MagicMock
 
@@ -14,10 +15,12 @@ from sqlalchemy.exc import IntegrityError
 from analyzer.inference.writer import (
     InsertOutcome,
     PriceBandRow,
+    PriceCurveRow,
     TradingSignalRow,
     format_horizon_label,
     format_model_version,
     insert_signal_price_bands,
+    insert_signal_price_curve,
     insert_trading_signal,
 )
 
@@ -230,3 +233,108 @@ class TestInsertSignalPriceBands:
         params = insert_call[0][1]
         assert params["regime_suppressed"] is False
         assert params["model_version"] == "domestic_20_ensemble_2026-08-19"
+
+
+def _price_curve_row(**overrides) -> PriceCurveRow:
+    defaults = {
+        "stock_id": 1,
+        "trade_date": date(2026, 9, 10),
+        "horizon": 20,
+        "prev_close": 50_000.0,
+        "grid_step_pct": 0.005,
+        "curve": [
+            {"price": 49_750.0, "score": -0.01},
+            {"price": 50_000.0, "score": 0.0},
+            {"price": 50_250.0, "score": 0.01},
+        ],
+        "model_version": "domestic_20_ensemble_2026-08-19",
+    }
+    defaults.update(overrides)
+    return PriceCurveRow(**defaults)
+
+
+class TestInsertSignalPriceCurve:
+    """SPEC-SIGNAL-PRICECURVE-001 M2(AC-PRICECURVE-002): 사전 SELECT +
+    (stock_id, trade_date, horizon) 3-튜플 단위 멱등 INSERT — boundary_set
+    차원이 없어 1회 호출당 정확히 1행만 쓴다."""
+
+    def test_first_insert_writes_one_row(self):
+        engine, conn = _mock_engine_and_conn()
+        select_result = MagicMock()
+        select_result.first.return_value = None
+        conn.execute.return_value = select_result
+
+        outcome = insert_signal_price_curve(engine, _price_curve_row())
+
+        assert outcome == InsertOutcome.INSERTED
+        assert conn.execute.call_count == 2  # 1 SELECT + 1 INSERT
+
+    def test_existing_combination_is_skipped_without_insert(self):
+        engine, conn = _mock_engine_and_conn()
+        select_result = MagicMock()
+        select_result.first.return_value = (1,)
+        conn.execute.return_value = select_result
+
+        outcome = insert_signal_price_curve(engine, _price_curve_row())
+
+        assert outcome == InsertOutcome.SKIPPED_DUPLICATE
+        assert conn.execute.call_count == 1
+
+    def test_integrity_error_during_insert_is_caught_and_skipped(self):
+        engine, conn = _mock_engine_and_conn()
+        select_result = MagicMock()
+        select_result.first.return_value = None
+        conn.execute.side_effect = [
+            select_result,
+            IntegrityError("stmt", {}, Exception("Duplicate entry")),
+        ]
+
+        outcome = insert_signal_price_curve(engine, _price_curve_row())
+
+        assert outcome == InsertOutcome.SKIPPED_DUPLICATE
+
+    def test_curve_is_bound_as_json_text(self):
+        """REQ-PRICECURVE-003: curve는 네이티브 JSON 컬럼 바인딩을 위해
+        직렬화된 텍스트로 전달돼야 한다(그리드 오름차순 그대로)."""
+        engine, conn = _mock_engine_and_conn()
+        select_result = MagicMock()
+        select_result.first.return_value = None
+        conn.execute.return_value = select_result
+        curve = [{"price": 49_750.0, "score": -0.01}, {"price": 50_000.0, "score": 0.0}]
+
+        insert_signal_price_curve(engine, _price_curve_row(curve=curve))
+
+        insert_call = conn.execute.call_args_list[-1]
+        params = insert_call[0][1]
+        assert params["curve"] == json.dumps(curve)
+        assert json.loads(params["curve"]) == curve
+
+    def test_no_boundary_set_dimension_in_params(self):
+        """plan.md §B-2: signal_price_curves는 boundary_set 컬럼이 없다 —
+        PROMOTE/DEMOTE 구분 없이 (stock_id, trade_date, horizon)당 1행."""
+        engine, conn = _mock_engine_and_conn()
+        select_result = MagicMock()
+        select_result.first.return_value = None
+        conn.execute.return_value = select_result
+
+        insert_signal_price_curve(engine, _price_curve_row())
+
+        for call in conn.execute.call_args_list:
+            assert "boundary_set" not in call[0][1]
+            assert "band_seq" not in call[0][1]
+
+    def test_horizon_label_and_model_version_passed_through(self):
+        engine, conn = _mock_engine_and_conn()
+        select_result = MagicMock()
+        select_result.first.return_value = None
+        conn.execute.return_value = select_result
+
+        insert_signal_price_curve(
+            engine,
+            _price_curve_row(horizon=60, model_version="overseas_60_xgboost_2026-08-19"),
+        )
+
+        insert_call = conn.execute.call_args_list[-1]
+        params = insert_call[0][1]
+        assert params["horizon"] == "D60"
+        assert params["model_version"] == "overseas_60_xgboost_2026-08-19"

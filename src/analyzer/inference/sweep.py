@@ -37,6 +37,7 @@ import numpy as np
 import pandas as pd
 from sqlalchemy.engine import Engine
 
+from analyzer.common.logging import get_logger
 from analyzer.data.adjustment import adjust_prices
 from analyzer.data.models import TradingCalendar
 from analyzer.data.repository import fetch_corporate_events, fetch_daily_ohlcv, fetch_investor_trend
@@ -56,7 +57,14 @@ from analyzer.inference.resolution import (
     compute_score_columns,
     detect_manifest_race,
 )
-from analyzer.inference.writer import PriceBandRow, insert_signal_price_bands
+from analyzer.inference.writer import (
+    PriceBandRow,
+    PriceCurveRow,
+    insert_signal_price_bands,
+    insert_signal_price_curve,
+)
+
+logger = get_logger(__name__)
 
 DOMESTIC_GRID_RANGE_PCT = 0.30
 """REQ-AIF-110 확정값 — 국내 가격제한폭(상한가/하한가) ±30%(TECHSPEC:1174)."""
@@ -406,6 +414,37 @@ def _refine_internal_boundaries(
     }
 
 
+def _sweep_price_partitions_impl(
+    grid: np.ndarray,
+    boundaries_by_set: Mapping[BoundarySet, Mapping[str, float]],
+    *,
+    prev_close: float,
+    evaluate: Callable[[np.ndarray], np.ndarray],
+) -> tuple[dict[BoundarySet, list[PriceBand]], np.ndarray]:
+    """`sweep_price_partitions()`/`sweep_price_partitions_with_curve()`가
+    공유하는 내부 구현 — `evaluate(grid)`를 정확히 1회만 호출해 파생한
+    `grid_scores`를 둘 다 재사용하도록 함께 반환한다(SPEC-SIGNAL-PRICECURVE-001
+    M2, REQ-001: evaluate() 호출 횟수가 커브 저장 추가 이전과 동일해야 한다)."""
+    grid = np.asarray(grid, dtype=float)
+    grid_scores = np.asarray(evaluate(grid), dtype=float)
+    merged_by_set = {
+        boundary_set: merge_adjacent_bands(
+            grid, classify_grades(grid_scores, boundaries), prev_close=prev_close
+        )
+        for boundary_set, boundaries in boundaries_by_set.items()
+    }
+    refined = _refine_internal_boundaries(merged_by_set, boundaries_by_set, evaluate)
+
+    partitions: dict[BoundarySet, list[PriceBand]] = {}
+    for boundary_set, bands in merged_by_set.items():
+        edges = [bands[0].price_low, *refined[boundary_set], bands[-1].price_high]
+        partitions[boundary_set] = [
+            PriceBand(price_low=low, price_high=high, signal_class=band.signal_class)
+            for band, (low, high) in zip(bands, pairwise(edges), strict=True)
+        ]
+    return partitions, grid_scores
+
+
 # @MX:ANCHOR: [AUTO] 밴드 파티션 산출 계약 — 격자 등급 → run-length → 1% 조각 병합 → 내부 경계
 # 정련(PD-1) → 인접 밴드가 경계를 공유하는 연속 파티션(REQ-AIR-001).
 # @MX:REASON: notifier `BandPartition.lookup`의 반개구간 해석(REQ-AIR-002)과 T4 재생 검증이
@@ -427,24 +466,30 @@ def sweep_price_partitions(
     그대로다. 마지막 밴드를 제외한 밴드는 `[price_low, price_high)`, 마지막
     밴드는 `[price_low, price_high]`로 읽는다.
     """
-    grid = np.asarray(grid, dtype=float)
-    grid_scores = np.asarray(evaluate(grid), dtype=float)
-    merged_by_set = {
-        boundary_set: merge_adjacent_bands(
-            grid, classify_grades(grid_scores, boundaries), prev_close=prev_close
-        )
-        for boundary_set, boundaries in boundaries_by_set.items()
-    }
-    refined = _refine_internal_boundaries(merged_by_set, boundaries_by_set, evaluate)
-
-    partitions: dict[BoundarySet, list[PriceBand]] = {}
-    for boundary_set, bands in merged_by_set.items():
-        edges = [bands[0].price_low, *refined[boundary_set], bands[-1].price_high]
-        partitions[boundary_set] = [
-            PriceBand(price_low=low, price_high=high, signal_class=band.signal_class)
-            for band, (low, high) in zip(bands, pairwise(edges), strict=True)
-        ]
+    partitions, _grid_scores = _sweep_price_partitions_impl(
+        grid, boundaries_by_set, prev_close=prev_close, evaluate=evaluate
+    )
     return partitions
+
+
+# @MX:NOTE: [AUTO] signal_price_curves 커브 저장용 — sweep_price_partitions()의
+# 하위 호환 반환 형태(dict만)를 깨지 않기 위해 별도 함수로 grid_scores를 노출한다
+# (SPEC-SIGNAL-PRICECURVE-001 M2, plan.md §C M2 "run 단계에서 선택" 중 (b)안).
+def sweep_price_partitions_with_curve(
+    grid: np.ndarray,
+    boundaries_by_set: Mapping[BoundarySet, Mapping[str, float]],
+    *,
+    prev_close: float,
+    evaluate: Callable[[np.ndarray], np.ndarray],
+) -> tuple[dict[BoundarySet, list[PriceBand]], np.ndarray]:
+    """`sweep_price_partitions()`와 완전히 동일한 파티션을 산출하되,
+    PROMOTE/DEMOTE 양쪽이 공유하는 그리드별 score(`grid_scores`)를 폐기하지
+    않고 함께 반환한다(REQ-PRICECURVE-001). 반환된 `grid_scores`는 호출자가
+    넘긴 `grid`와 같은 길이·순서이며, `signal_price_curves.curve` 저장에 쓰는
+    "그리드 오름차순" 커브와 1:1 대응한다(REQ-PRICECURVE-003)."""
+    return _sweep_price_partitions_impl(
+        grid, boundaries_by_set, prev_close=prev_close, evaluate=evaluate
+    )
 
 
 def _union_feature_columns(serving_plan: ServingPlan) -> list[str]:
@@ -479,9 +524,11 @@ def sweep_and_write_price_bands(
     피처 조립 실패(이력 부족)는 `SkipReason.FEATURE_INSUFFICIENT`로,
     격자·정련 평가를 모두 마친 뒤 감지된 학습 잡 레이스는
     `SkipReason.MANIFEST_RACE`로 라우팅한다(design.md §7, REQ-AIR-007) — 두
-    경우 모두 `signal_price_bands`에 어떤 행도 기록하지 않는다. 성공 시
-    boundary_set별 INSERT 결과를 담은 매핑(`{"PROMOTE": ..., "DEMOTE": ...}`)을
-    반환한다.
+    경우 모두 `signal_price_bands`/`signal_price_curves`에 어떤 행도 기록하지
+    않는다. 성공 시 boundary_set별 INSERT 결과를 담은 매핑
+    (`{"PROMOTE": ..., "DEMOTE": ...}`)을 반환한다 — 커브 1행은 같은 성공
+    경로에서 함께 기록되지만(SPEC-SIGNAL-PRICECURVE-001 M2, REQ-PRICECURVE-004),
+    이 반환값에는 포함되지 않는다(밴드 INSERT 결과 계약을 바꾸지 않는다).
     """
     feature_columns = _union_feature_columns(serving_plan)
     context = prepare_sweep_context(
@@ -497,7 +544,7 @@ def sweep_and_write_price_bands(
         boundary_set: boundaries_artifact.boundaries_for(market, horizon, boundary_set)
         for boundary_set in (BoundarySet.PROMOTE, BoundarySet.DEMOTE)
     }
-    partitions = sweep_price_partitions(
+    partitions, grid_scores = sweep_price_partitions_with_curve(
         context.grid, boundaries_by_set, prev_close=context.prev_close, evaluate=evaluate
     )
 
@@ -522,4 +569,35 @@ def sweep_and_write_price_bands(
             for seq, band in enumerate(bands)
         ]
         outcomes[boundary_set.value] = insert_signal_price_bands(engine, rows)
+
+    # SPEC-SIGNAL-PRICECURVE-001 M2(REQ-PRICECURVE-004, plan-audit D5): 커브
+    # INSERT는 밴드 INSERT와 논리적으로 독립된 산출물이다 — 실패해도 이미
+    # 성공한 밴드 INSERT 결과(outcomes)를 롤백하거나 이 함수의 반환을
+    # 바꾸지 않는다. 로그만 남기고 계속한다.
+    try:
+        curve = [
+            {"price": price, "score": score}
+            for price, score in zip(context.grid.tolist(), grid_scores.tolist(), strict=True)
+        ]
+        insert_signal_price_curve(
+            engine,
+            PriceCurveRow(
+                stock_id=stock_id,
+                trade_date=trade_date,
+                horizon=horizon,
+                prev_close=context.prev_close,
+                grid_step_pct=GRID_STEP_PCT,
+                curve=curve,
+                model_version=model_version,
+            ),
+        )
+    except Exception:
+        logger.exception(
+            "signal_price_curves INSERT 실패 stock=%s market=%s horizon=%d trade_date=%s",
+            stock_code,
+            market,
+            horizon,
+            trade_date,
+        )
+
     return outcomes
